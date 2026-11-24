@@ -19,10 +19,10 @@ const server = app.listen(PORT, () => {
   console.log(`- Users: ${store.users.length}`);
   console.log(`- Accounts: ${store.accounts.length}`);
   const clientAccount = store.getAccountByUserId('user-1');
-  const freelancerAccount = store.getAccountByUserId('user-2');
+  const providerAccount = store.getAccountByUserId('user-2');
   const escrowAccount = store.getEscrowAccount();
   console.log(`  - Client (user-1): ₹${clientAccount.balance}`);
-  console.log(`  - Freelancer (user-2): ₹${freelancerAccount.balance}`);
+  console.log(`  - Provider (user-2): ₹${providerAccount.balance}`);
   console.log(`  - Escrow: ₹${escrowAccount.balance}`);
   console.log(`\nServer ready to accept requests.`);
 });

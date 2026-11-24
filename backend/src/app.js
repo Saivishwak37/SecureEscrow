@@ -5,7 +5,9 @@ const { BaseError } = require('./utils/errors');
 
 const app = express();
 
-app.use(express.json());
+// File submissions are sent as base64 JSON, which adds roughly 33% to the
+// original file size. Leave headroom above the UI's 7 MB combined file cap.
+app.use(express.json({ limit: '50mb' }));
 
 // CORS
 app.use((req, res, next) => {
@@ -36,10 +38,13 @@ app.get('/health', (req, res) => {
 
 // API Routes
 app.use('/api/users', require('./routes/userRoutes'));
+app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/accounts', require('./routes/accountRoutes'));
 app.use('/api/escrows', require('./routes/escrowRoutes'));
 app.use('/api/milestones', require('./routes/milestoneRoutes'));
+app.use('/api/conditions', require('./routes/conditionRoutes'));
 app.use('/api/transactions', require('./routes/transactionRoutes'));
+app.use('/api/disputes', require('./routes/disputeRoutes'));
 
 // 404 Handler - Catch unmatched routes
 app.use((req, res, next) => {
@@ -53,6 +58,13 @@ app.use((req, res, next) => {
 app.use((err, req, res, next) => {
   console.error(`[ERROR] ${err.name}: ${err.message}`);
   if (err.details) console.error(JSON.stringify(err.details, null, 2));
+
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({
+      error: 'PAYLOAD_TOO_LARGE',
+      message: 'The upload request is too large. Choose smaller files and try again.'
+    });
+  }
 
   // If the error is a known domain exception, use its status and structure
   if (err instanceof BaseError) {

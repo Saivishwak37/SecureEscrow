@@ -3,10 +3,16 @@ const express = require('express');
 const router = express.Router();
 
 const transactionController = require('../controllers/transactionController');
+const authenticate = require('../middleware/authenticate');
+const rejectIdentitySpoof = require('../middleware/rejectIdentitySpoof');
+const requireRole = require('../middleware/requireRole');
+
+router.use(authenticate, rejectIdentitySpoof);
 
 // Validate complete ledger
 router.get(
   '/validation/ledger',
+  requireRole('ADMIN'),
   transactionController.validateLedger
 );
 

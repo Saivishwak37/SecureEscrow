@@ -6,7 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 
 const TRANSACTION_TYPES = {
   FUND: 'FUND',           // Client -> Escrow (funding a milestone)
-  RELEASE: 'RELEASE',     // Escrow -> Freelancer (paying out milestone)
+  RELEASE: 'RELEASE',     // Escrow -> Provider (paying out milestone)
   REFUND: 'REFUND'        // Escrow -> Client (cancelling milestone)
 };
 

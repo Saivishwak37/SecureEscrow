@@ -8,7 +8,7 @@ const { v4: uuidv4 } = require('uuid');
  * @param {Object} transactionData - { type, amount, status, escrowId, milestoneId, fromAccountId, toAccountId }
  * @returns {Object} Created transaction
  */
-function createTransaction({ type, amount, status = 'PENDING', escrowId, milestoneId = null, fromAccountId, toAccountId }) {
+function createTransaction({ type, amount, status = 'PENDING', escrowId, milestoneId = null, fromAccountId, toAccountId, disputeId = null, resolutionId = null }) {
   const store = getStore();
   const transaction = {
     id: uuidv4(),
@@ -19,6 +19,8 @@ function createTransaction({ type, amount, status = 'PENDING', escrowId, milesto
     milestoneId,
     fromAccountId,
     toAccountId,
+    ...(disputeId ? { disputeId } : {}),
+    ...(resolutionId ? { resolutionId } : {}),
     createdAt: Date.now()
   };
   return store.add('transactions', transaction);
@@ -68,6 +70,13 @@ function getTransactionsByMilestoneId(milestoneId) {
   return store.findByField('transactions', 'milestoneId', milestoneId);
 }
 
+function getTransactionsByAccountId(accountId) {
+  const store = getStore();
+  return store.findAll('transactions')
+    .filter(transaction => transaction.fromAccountId === accountId || transaction.toAccountId === accountId)
+    .sort((a, b) => a.createdAt - b.createdAt);
+}
+
 /**
  * Update transaction status
  * @param {string} id - Transaction ID
@@ -86,5 +95,6 @@ module.exports = {
   getAllTransactions,
   getTransactionsByEscrowId,
   getTransactionsByMilestoneId,
+  getTransactionsByAccountId,
   updateTransactionStatus
 };

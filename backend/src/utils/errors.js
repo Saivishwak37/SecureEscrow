@@ -25,6 +25,12 @@ class ValidationError extends BaseError {
   }
 }
 
+class ConflictError extends BaseError {
+  constructor(message, details = null) {
+    super(message, 409, 'CONFLICT', details);
+  }
+}
+
 class NotFoundError extends BaseError {
   constructor(resource, id) {
     super(`${resource} with id ${id} not found`, 404, 'NOT_FOUND', { resource, id });
@@ -41,6 +47,12 @@ class InvalidStateTransitionError extends BaseError {
 class UnauthorizedError extends BaseError {
   constructor(message = 'Unauthorized') {
     super(message, 403, 'UNAUTHORIZED');
+  }
+}
+
+class AuthenticationError extends BaseError {
+  constructor(message = 'Invalid or missing authentication credentials') {
+    super(message, 401, 'UNAUTHORIZED');
   }
 }
 
@@ -65,9 +77,11 @@ class InsufficientBalanceError extends BaseError {
 module.exports = {
   BaseError,
   ValidationError,
+  ConflictError,
   NotFoundError,
   InvalidStateTransitionError,
   UnauthorizedError,
+  AuthenticationError,
   LedgerImbalanceError,
   DuplicateTransactionError,
   InsufficientBalanceError

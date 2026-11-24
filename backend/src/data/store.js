@@ -9,8 +9,16 @@ class InMemoryStore {
     this.accounts = [];
     this.escrows = [];
     this.milestones = [];
+    this.conditions = [];
     this.transactions = [];
     this.ledgerEntries = [];
+    this.disputes = [];
+    this.disputeEvidence = [];
+    this.disputeMessages = [];
+    this.disputeResolutions = [];
+    this.disputeResolutionAllocations = [];
+    this.disputeStatusHistory = [];
+    this.escrowStatusHistory = [];
 
     // Initialize with seed data
     this.initializeSeedData();
@@ -21,30 +29,52 @@ class InMemoryStore {
     const clientUser = {
       id: 'user-1',
       name: 'Test Client',
+      username: 'client1',
       type: 'CLIENT',
+      role: 'CLIENT',
+      email: 'demo.client@secureescrow.test',
+      passwordHash: '$2b$12$GQt1/iZOaag6A6MB3CaOrOX.29PYpMNs6llbxB/4RjIhY7QMRM/xW',
+      isActive: true,
       createdAt: Date.now()
     };
 
-    const freelancerUser = {
+    const providerUser = {
       id: 'user-2',
-      name: 'Test Freelancer',
-      type: 'FREELANCER',
+      name: 'Test Provider',
+      username: 'provider1',
+      type: 'PROVIDER',
+      role: 'PROVIDER',
+      email: 'demo.provider@secureescrow.test',
+      passwordHash: '$2b$12$c95N6TbQ7dUwCymdau64Q.J5bPko9/Czrp0z0W8IQSgnoQm/OMjIW',
+      isActive: true,
       createdAt: Date.now()
     };
 
-    this.users.push(clientUser, freelancerUser);
+    const adminUser = {
+      id: 'user-admin',
+      name: 'SecureEscrow Admin',
+      username: 'admin1',
+      type: 'ADMIN',
+      role: 'ADMIN',
+      email: 'demo.admin@secureescrow.test',
+      passwordHash: '$2b$12$xrHTZC.JVr18Lge3BKCTn.iIEk8v4RbvERK5j5pTbhXW2WPErebvC',
+      isActive: true,
+      createdAt: Date.now()
+    };
+
+    this.users.push(clientUser, providerUser, adminUser);
 
     // Create accounts
     const clientAccount = {
       id: 'account-user-1',
       userId: 'user-1',
-      balance: 50000,
+      balance: 1000000,
       currency: 'INR',
       type: 'PERSONAL',
       createdAt: Date.now()
     };
 
-    const freelancerAccount = {
+    const providerAccount = {
       id: 'account-user-2',
       userId: 'user-2',
       balance: 0,
@@ -63,7 +93,18 @@ class InMemoryStore {
       createdAt: Date.now()
     };
 
-    this.accounts.push(clientAccount, freelancerAccount, escrowAccount);
+    // Demo clearing account used to balance wallet deposits and withdrawals.
+    // A real payment integration would replace this simulated source/sink.
+    const clearingAccount = {
+      id: 'account-clearing',
+      userId: null,
+      balance: 1000000000000000,
+      currency: 'INR',
+      type: 'EXTERNAL',
+      createdAt: Date.now()
+    };
+
+    this.accounts.push(clientAccount, providerAccount, escrowAccount, clearingAccount);
   }
 
   // Generic find methods
@@ -126,8 +167,16 @@ class InMemoryStore {
     this.accounts = [];
     this.escrows = [];
     this.milestones = [];
+    this.conditions = [];
     this.transactions = [];
     this.ledgerEntries = [];
+    this.disputes = [];
+    this.disputeEvidence = [];
+    this.disputeMessages = [];
+    this.disputeResolutions = [];
+    this.disputeResolutionAllocations = [];
+    this.disputeStatusHistory = [];
+    this.escrowStatusHistory = [];
   }
 
   // Reset to seed data

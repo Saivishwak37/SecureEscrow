@@ -1,8 +1,11 @@
 // Ledger Service - Double-entry ledger operations with financial correctness
 const ledgerRepository = require('../repositories/ledgerRepository');
 const accountRepository = require('../repositories/accountRepository');
+const transactionRepository = require('../repositories/transactionRepository');
+const escrowRepository = require('../repositories/escrowRepository');
 const { createLedgerEntries, validateAccountBalance } = require('../domain/ledgerRules');
-const { LedgerImbalanceError, InsufficientBalanceError } = require('../utils/errors');
+const { LedgerImbalanceError, InsufficientBalanceError, ValidationError } = require('../utils/errors');
+const { assertEscrowNotDisputed } = require('../domain/escrowGuards');
 
 /**
  * Record a double-entry transaction in the ledger
@@ -12,10 +15,23 @@ const { LedgerImbalanceError, InsufficientBalanceError } = require('../utils/err
  * @param {number} amount - Transaction amount
  * @returns {Object} Created ledger entries
  */
-async function recordTransaction(transactionId, fromAccountId, toAccountId, amount) {
+function recordTransactionInternal(transactionId, fromAccountId, toAccountId, amount, allowDisputeResolution = false) {
   // 1. Validate accounts exist
   const fromAccount = accountRepository.getAccountById(fromAccountId);
   const toAccount = accountRepository.getAccountById(toAccountId);
+
+  // Escrow-account debits must be backed by a matching release/refund transaction.
+  // This closes direct ledger-service calls as well as normal transaction flows.
+  if (fromAccount.type === 'ESCROW') {
+    const transaction = transactionRepository.getTransactionById(transactionId);
+    if (!transaction.escrowId || !['RELEASE', 'REFUND'].includes(transaction.type)
+      || transaction.fromAccountId !== fromAccountId || transaction.toAccountId !== toAccountId
+      || transaction.amount !== amount) {
+      throw new ValidationError('Escrow-account debits require a matching release or refund transaction');
+    }
+    const escrow = escrowRepository.getEscrowById(transaction.escrowId);
+    if (!allowDisputeResolution) assertEscrowNotDisputed(escrow, 'Escrow-account debit');
+  }
 
   // 2. Validate sufficient balance
   validateAccountBalance(fromAccount, amount);
@@ -55,6 +71,39 @@ async function recordTransaction(transactionId, fromAccountId, toAccountId, amou
     toAccountId,
     amount
   };
+}
+
+function recordTransaction(transactionId, fromAccountId, toAccountId, amount) {
+  return recordTransactionInternal(transactionId, fromAccountId, toAccountId, amount, false);
+}
+
+// Internal controlled path. Its checks are repeated here so a caller cannot
+// turn an arbitrary escrow debit into a dispute resolution transfer.
+function recordDisputeResolutionTransaction(transactionId, disputeId, actorId) {
+  const { getStore } = require('../data/store');
+  const store = getStore();
+  const transaction = transactionRepository.getTransactionById(transactionId);
+  const dispute = store.findById('disputes', disputeId);
+  const user = store.findById('users', actorId);
+  const resolution = store.findById('disputeResolutions', transaction.resolutionId);
+  if (!dispute || user?.isActive === false || (user?.role || user?.type) !== 'ADMIN' || transaction.disputeId !== disputeId || !resolution
+    || resolution.disputeId !== disputeId || resolution.resolvedBy !== actorId) {
+    throw new ValidationError('Invalid controlled dispute resolution transaction');
+  }
+  const escrow = escrowRepository.getEscrowById(dispute.escrowId);
+  const from = accountRepository.getAccountById(transaction.fromAccountId);
+  const to = accountRepository.getAccountById(transaction.toAccountId);
+  const expectedUserId = transaction.type === 'RELEASE' ? escrow.payeeId || escrow.freelancerId
+    : transaction.type === 'REFUND' ? escrow.payerId || escrow.clientId : null;
+  const expectedRole = transaction.type === 'RELEASE' ? ['PAYEE', 'PROVIDER'] : ['PAYER', 'CLIENT'];
+  if (dispute.status === 'RESOLVED' || escrow.status !== 'DISPUTED' || !escrow.disputed
+    || transaction.escrowId !== escrow.id || from.type !== 'ESCROW' || to.userId !== expectedUserId
+    || transaction.milestoneId !== (resolution.milestoneId || null)
+    || !escrow.participants?.some(participant => participant.userId === expectedUserId && expectedRole.includes(participant.role))
+    || from.currency !== to.currency || transaction.amount <= 0) {
+    throw new ValidationError('Dispute resolution transfer does not match the disputed escrow participants');
+  }
+  return recordTransactionInternal(transaction.id, transaction.fromAccountId, transaction.toAccountId, transaction.amount, true);
 }
 
 /**
@@ -131,6 +180,7 @@ function validateAllLedgers() {
 
 module.exports = {
   recordTransaction,
+  recordDisputeResolutionTransaction,
   getAccountLedger,
   getLedgerEntriesByTransaction,
   getAccountBalance,

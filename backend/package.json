@@ -9,17 +9,25 @@
     "test": "jest --coverage",
     "test:watch": "jest --watch"
   },
-  "keywords": ["escrow", "payment", "transaction", "ledger"],
+  "keywords": [
+    "escrow",
+    "payment",
+    "transaction",
+    "ledger"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^16.0.3",
     "express": "^4.18.2",
-    "uuid": "^9.0.0",
-    "dotenv": "^16.0.3"
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.5.0",
+    "uuid": "^9.0.0"
   },
   "devDependencies": {
     "jest": "^29.5.0",
-    "supertest": "^6.3.3",
-    "nodemon": "^3.0.1"
+    "nodemon": "^3.0.1",
+    "supertest": "^6.3.3"
   }
 }

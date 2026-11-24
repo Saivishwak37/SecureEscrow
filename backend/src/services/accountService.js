@@ -1,7 +1,51 @@
 // Account Service - Account and balance management
 const accountRepository = require('../repositories/accountRepository');
 const userRepository = require('../repositories/userRepository');
-const { NotFoundError } = require('../utils/errors');
+const { ValidationError, UnauthorizedError } = require('../utils/errors');
+const transactionRepository = require('../repositories/transactionRepository');
+const ledgerService = require('./ledgerService');
+const { assertActorRole } = require('../domain/participantAuthorization');
+
+const CLEARING_ACCOUNT_ID = 'account-clearing';
+
+function transferFunds(accountId, actorId, amount, operation) {
+  assertActorRole(actorId, ['CLIENT', 'PROVIDER']);
+  const account = accountRepository.getAccountById(accountId);
+  if (account.type !== 'PERSONAL' || account.userId !== actorId) throw new UnauthorizedError('You can only move funds in your own personal account');
+  if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0 || Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-7) {
+    throw new ValidationError('Enter an amount greater than zero with no more than two decimal places');
+  }
+
+  const clearing = accountRepository.getAccountById(CLEARING_ACCOUNT_ID);
+  const isDeposit = operation === 'DEPOSIT';
+  const fromAccountId = isDeposit ? clearing.id : account.id;
+  const toAccountId = isDeposit ? account.id : clearing.id;
+  const transaction = transactionRepository.createTransaction({
+    type: operation, amount, status: 'PENDING', escrowId: null, milestoneId: null, fromAccountId, toAccountId,
+  });
+
+  try {
+    ledgerService.recordTransaction(transaction.id, fromAccountId, toAccountId, amount);
+    const completed = transactionRepository.updateTransactionStatus(transaction.id, 'COMPLETED');
+    return { transaction: completed, account: accountRepository.getAccountById(accountId) };
+  } catch (error) {
+    transactionRepository.updateTransactionStatus(transaction.id, 'FAILED');
+    throw error;
+  }
+}
+
+function addFunds(accountId, actorId, amount) {
+  return transferFunds(accountId, actorId, amount, 'DEPOSIT');
+}
+
+function withdrawFunds(accountId, actorId, amount) {
+  return transferFunds(accountId, actorId, amount, 'WITHDRAWAL');
+}
+
+function getAccountTransactions(accountId) {
+  accountRepository.getAccountById(accountId);
+  return transactionRepository.getTransactionsByAccountId(accountId);
+}
 
 /**
  * Get account for a user
@@ -12,7 +56,12 @@ function getAccountByUserId(userId) {
   userRepository.getUserById(userId); // Will throw if user doesn't exist
   const account = accountRepository.getAccountByUserId(userId);
   if (!account) {
-    throw new NotFoundError('Account', userId);
+    // Older in-memory sessions can contain a registered user created before
+    // wallet provisioning was added to registration. Repair that state on
+    // the authenticated self-account lookup so the user can enter the app.
+    // createAccountForUser enforces the CLIENT/PROVIDER role and creates a
+    // zero-balance PERSONAL account using only the server-verified user ID.
+    return createAccountForUser({ userId });
   }
   return account;
 }
@@ -33,6 +82,7 @@ function getAccountBalance(userId) {
  * @returns {Object} Account
  */
 function createAccountForUser({ userId, currency = 'INR' }) {
+  assertActorRole(userId, ['CLIENT', 'PROVIDER']);
   userRepository.getUserById(userId);
   return accountRepository.createAccount({
     userId,
@@ -72,5 +122,8 @@ module.exports = {
   getAccountBalance,
   createAccountForUser,
   getEscrowAccount,
-  getAccountDetails
+  getAccountDetails,
+  addFunds,
+  withdrawFunds,
+  getAccountTransactions
 };

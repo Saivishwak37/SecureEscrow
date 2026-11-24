@@ -1,6 +1,6 @@
 # Dependencies
 node_modules/
-package-lock.json
+
 yarn.lock
 pnpm-lock.yaml
 
@@ -84,3 +84,5 @@ temp/
 *.p12
 secrets/
 credentials/
+# Local development uploads (never commit user evidence)
+/uploads/dispute-evidence/

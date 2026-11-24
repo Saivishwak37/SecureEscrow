@@ -1,14 +1,25 @@
 // Escrow Repository - Data access layer for escrows
 const { getStore } = require('../data/store');
-const { NotFoundError } = require('../utils/errors');
+const { NotFoundError, ValidationError } = require('../utils/errors');
 const { v4: uuidv4 } = require('uuid');
+const escrowStatusHistoryRepository = require('./escrowStatusHistoryRepository');
+
+function hasOpenDispute(escrowId) {
+  return getStore().findByField('disputes', 'escrowId', escrowId).some(dispute => dispute.status === 'OPEN');
+}
+
+function rejectUnfreezeWhileDisputed(escrow, updates) {
+  if (hasOpenDispute(escrow.id) && ((updates.status && updates.status !== 'DISPUTED') || updates.disputed === false)) {
+    throw new ValidationError('An escrow cannot leave DISPUTED while an open dispute exists');
+  }
+}
 
 /**
  * Create a new escrow
  * @param {Object} escrowData - { title, description, clientId, freelancerId, totalAmount, status }
  * @returns {Object} Created escrow
  */
-function createEscrow({ title, description, clientId, freelancerId, totalAmount, status = 'CREATED' }) {
+function createEscrow({ title, description, clientId, freelancerId, payerId, payeeId, totalAmount, status = 'CREATED', releaseModel = 'MILESTONE_BASED', releasePolicy = 'ALL_REQUIRED', agreementType = 'GENERAL', terms = '', metadata = {}, participants = [] }) {
   const store = getStore();
   const escrow = {
     id: uuidv4(),
@@ -16,7 +27,19 @@ function createEscrow({ title, description, clientId, freelancerId, totalAmount,
     description: description || '',
     clientId,
     freelancerId,
+    payerId: payerId || clientId,
+    payeeId: payeeId || freelancerId,
     totalAmount,
+    releaseModel,
+    releasePolicy,
+    agreementType,
+    terms,
+    metadata,
+    participants: participants.length ? participants : [
+      { userId: payerId || clientId, role: 'PAYER' },
+      { userId: payeeId || freelancerId, role: 'PAYEE' }
+    ],
+    disputed: false,
     status,
     createdAt: Date.now(),
     updatedAt: Date.now()
@@ -59,13 +82,13 @@ function getEscrowsByClientId(clientId) {
 }
 
 /**
- * Get escrows by freelancer ID
- * @param {string} freelancerId - Freelancer user ID
- * @returns {Array} Freelancer's escrows
+ * Get escrows assigned to a provider. The storage column retains its legacy name.
+ * @param {string} providerId - Provider user ID
+ * @returns {Array} Provider's escrows
  */
-function getEscrowsByFreelancerId(freelancerId) {
+function getEscrowsByProviderId(providerId) {
   const store = getStore();
-  return store.findByField('escrows', 'freelancerId', freelancerId);
+  return store.findByField('escrows', 'freelancerId', providerId);
 }
 
 /**
@@ -77,6 +100,7 @@ function getEscrowsByFreelancerId(freelancerId) {
 function updateEscrowStatus(id, newStatus) {
   const store = getStore();
   const escrow = getEscrowById(id);
+  rejectUnfreezeWhileDisputed(escrow, { status: newStatus });
   return store.update('escrows', id, { status: newStatus, updatedAt: Date.now() });
 }
 
@@ -89,7 +113,25 @@ function updateEscrowStatus(id, newStatus) {
 function updateEscrow(id, updates) {
   const store = getStore();
   const escrow = getEscrowById(id);
+  rejectUnfreezeWhileDisputed(escrow, updates);
   return store.update('escrows', id, { ...updates, updatedAt: Date.now() });
+}
+
+/** Atomically record the dispute freeze transition in the synchronous in-memory store. */
+function freezeEscrowForDispute(id, changedBy, reason) {
+  const store = getStore();
+  const escrow = getEscrowById(id);
+  const history = escrowStatusHistoryRepository.createEscrowStatusHistory({
+    escrowId: id, changedBy, fromStatus: escrow.status, toStatus: 'DISPUTED', reason,
+  });
+  try {
+    const updatedEscrow = store.update('escrows', id, { status: 'DISPUTED', disputed: true });
+    if (!updatedEscrow) throw new Error(`Escrow with id ${id} could not be updated`);
+    return updatedEscrow;
+  } catch (error) {
+    escrowStatusHistoryRepository.deleteEscrowStatusHistory(history.id);
+    throw error;
+  }
 }
 
 module.exports = {
@@ -97,7 +139,8 @@ module.exports = {
   getEscrowById,
   getAllEscrows,
   getEscrowsByClientId,
-  getEscrowsByFreelancerId,
+  getEscrowsByProviderId,
   updateEscrowStatus,
-  updateEscrow
+  updateEscrow,
+  freezeEscrowForDispute
 };

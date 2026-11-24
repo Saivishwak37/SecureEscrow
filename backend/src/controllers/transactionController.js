@@ -2,9 +2,11 @@
 
 const transactionService = require('../services/transactionService');
 const ledgerService = require('../services/ledgerService');
+const resourceAuthorization = require('../services/resourceAuthorization');
 
 function getTransaction(req, res, next) {
   try {
+    resourceAuthorization.assertTransactionAccess(req.params.id, req.auth);
     res.json({
       success: true,
       data: transactionService.getTransactionById(req.params.id)
@@ -16,6 +18,7 @@ function getTransaction(req, res, next) {
 
 async function getTransactionsByEscrow(req, res, next) {
   try {
+    resourceAuthorization.assertEscrowAccess(req.params.escrowId, req.auth, { allowAdmin: true });
     res.json({
       success: true,
       data: transactionService.getTransactionsByEscrow(req.params.escrowId)
@@ -27,6 +30,7 @@ async function getTransactionsByEscrow(req, res, next) {
 
 async function getTransactionLedger(req, res, next) {
   try {
+    resourceAuthorization.assertTransactionAccess(req.params.id, req.auth);
     res.json({
       success: true,
       data: ledgerService.getLedgerEntriesByTransaction(req.params.id)

@@ -11,7 +11,7 @@ const STATES = {
   SUBMITTED: 'SUBMITTED',       // Work submitted for review
   UNDER_REVIEW: 'UNDER_REVIEW', // Client is reviewing the work
   APPROVED: 'APPROVED',         // Work approved, waiting for release
-  RELEASED: 'RELEASED',         // Funds released to freelancer, milestone complete
+  RELEASED: 'RELEASED',         // Funds released to provider, milestone complete
   CANCELLED: 'CANCELLED',       // Escrow cancelled, funds refunded if any
   DISPUTED: 'DISPUTED',         // Escrow in dispute
   RESOLVED: 'RESOLVED',         // Dispute resolved
@@ -21,13 +21,14 @@ const STATES = {
 // All valid actions that can trigger a state transition
 const ACTIONS = {
   FUND: 'FUND',           // Client adds funds
-  START: 'START',         // Freelancer starts work
-  SUBMIT: 'SUBMIT',       // Freelancer submits work
+  START: 'START',         // Provider starts work
+  SUBMIT: 'SUBMIT',       // Provider submits work
   REVIEW: 'REVIEW',       // Client begins reviewing
   APPROVE: 'APPROVE',     // Client approves work
+  REJECT: 'REJECT',       // Client requests a revised submission
   RELEASE: 'RELEASE',     // System releases funds automatically after approval
   CANCEL: 'CANCEL',       // Client or System cancels
-  DISPUTE: 'DISPUTE',     // Client or Freelancer raises dispute
+  DISPUTE: 'DISPUTE',     // Client or Provider raises dispute
   RESOLVE: 'RESOLVE'      // Admin resolves dispute
 };
 
@@ -53,6 +54,7 @@ const TRANSITION_RULES = {
   },
   [STATES.UNDER_REVIEW]: {
     [ACTIONS.APPROVE]: STATES.APPROVED,
+    [ACTIONS.REJECT]: STATES.IN_PROGRESS,
     [ACTIONS.DISPUTE]: STATES.DISPUTED // Rejection is handled as dispute or specific action if needed
   },
   [STATES.APPROVED]: {

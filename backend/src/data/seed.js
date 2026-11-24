@@ -32,8 +32,8 @@ const seedUsers = [
   },
   {
     id: 'user-003',
-    email: 'mike.freelancer@example.com',
-    name: 'Mike Freelancer',
+    email: 'mike.provider@example.com',
+    name: 'Mike Provider',
     role: 'seller',
     balance: 3200.00,
     emailVerified: true,
