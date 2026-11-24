@@ -1,0 +1,490 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CLIENT
+  PROVIDER
+  ADMIN
+}
+
+enum LifecycleStatus {
+  CREATED
+  FUNDED
+  IN_PROGRESS
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  RELEASED
+  CANCELLED
+  DISPUTED
+  RESOLVED
+  EXPIRED
+}
+
+enum ReleaseModel {
+  MILESTONE_BASED
+  CONDITION_BASED
+}
+
+enum ReleasePolicy {
+  ALL_REQUIRED
+}
+
+enum AccountType {
+  PERSONAL
+  ESCROW
+  EXTERNAL
+}
+
+enum AccountStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ConditionType {
+  CLIENT_APPROVAL
+  WORK_SUBMITTED
+  DEADLINE_REACHED
+  PARTICIPANT_APPROVAL
+  EVIDENCE_SUBMITTED
+  DELIVERY_CONFIRMED
+  EXTERNAL_VERIFICATION
+  CUSTOM
+}
+
+enum ConditionStatus {
+  PENDING
+  SUBMITTED
+  REJECTED
+  SATISFIED
+}
+
+enum TransactionType {
+  FUND
+  RELEASE
+  REFUND
+  DEPOSIT
+  WITHDRAWAL
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+enum EntryType {
+  DEBIT
+  CREDIT
+}
+
+enum DisputeStatus {
+  OPEN
+  EVIDENCE_SUBMISSION
+  UNDER_REVIEW
+  RESOLVED
+}
+
+enum EvidenceType {
+  PDF
+  JPEG
+  PNG
+}
+
+enum ResolutionDecision {
+  RELEASE_TO_PROVIDER
+  REFUND_TO_CLIENT
+  SPLIT_FUNDS
+  PARTIAL_RELEASE
+}
+
+enum ResolutionStatus {
+  PENDING
+  PARTIAL
+  COMPLETED
+}
+
+enum HistoryEvent {
+  STATUS_TRANSITION
+  RESOLUTION_EXECUTED
+  RESOLUTION_FAILED
+}
+
+model User {
+  id           String   @id @default(uuid())
+  username     String?  @unique
+  email        String?  @unique
+  name         String?
+  passwordHash String?  @map("password_hash")
+  role         Role
+  isActive     Boolean  @default(true) @map("is_active")
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  escrowViaClient                 Escrow[]                 @relation("Escrow_client")
+  escrowViaProvider               Escrow[]                 @relation("Escrow_provider")
+  escrowParticipantViaUser        EscrowParticipant[]      @relation("EscrowParticipant_user")
+  accountViaUser                  Account[]                @relation("Account_user")
+  milestoneSubmissionViaSubmitter MilestoneSubmission[]    @relation("MilestoneSubmission_submitter")
+  milestoneSubmissionViaReviewer  MilestoneSubmission[]    @relation("MilestoneSubmission_reviewer")
+  escrowConditionViaSatisfier     EscrowCondition[]        @relation("EscrowCondition_satisfier")
+  escrowConditionViaSubmitter     EscrowCondition[]        @relation("EscrowCondition_submitter")
+  disputeViaRaiser                Dispute[]                @relation("Dispute_raiser")
+  disputeEvidenceViaUploader      DisputeEvidence[]        @relation("DisputeEvidence_uploader")
+  disputeMessageViaSender         DisputeMessage[]         @relation("DisputeMessage_sender")
+  disputeResolutionViaResolver    DisputeResolution[]      @relation("DisputeResolution_resolver")
+  escrowStatusHistoryViaActor     EscrowStatusHistory[]    @relation("EscrowStatusHistory_actor")
+  milestoneStatusHistoryViaActor  MilestoneStatusHistory[] @relation("MilestoneStatusHistory_actor")
+  disputeStatusHistoryViaActor    DisputeStatusHistory[]   @relation("DisputeStatusHistory_actor")
+
+  @@map("user")
+}
+
+model Escrow {
+  id                  String           @id @default(uuid())
+  clientId            String           @map("client_id")
+  providerId          String           @map("provider_id")
+  title               String
+  description         String           @default("")
+  totalAmount         Decimal          @map("total_amount") @db.Decimal(30, 8)
+  currency            String           @default("INR") @db.VarChar(3)
+  status              LifecycleStatus  @default(CREATED)
+  statusBeforeDispute LifecycleStatus? @map("status_before_dispute")
+  releaseModel        ReleaseModel     @map("release_model")
+  releasePolicy       ReleasePolicy    @default(ALL_REQUIRED) @map("release_policy")
+  agreementType       String           @default("GENERAL") @map("agreement_type")
+  terms               String           @default("")
+  metadata            Json             @default("{}")
+  updatedAt           DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdAt           DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  client                       User                  @relation("Escrow_client", fields: [clientId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  provider                     User                  @relation("Escrow_provider", fields: [providerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  escrowParticipantViaEscrow   EscrowParticipant[]   @relation("EscrowParticipant_escrow")
+  accountViaEscrow             Account?              @relation("Account_escrow")
+  milestoneViaEscrow           Milestone[]           @relation("Milestone_escrow")
+  escrowConditionViaEscrow     EscrowCondition[]     @relation("EscrowCondition_escrow")
+  transactionViaEscrow         Transaction[]         @relation("Transaction_escrow")
+  disputeViaEscrow             Dispute[]             @relation("Dispute_escrow")
+  escrowStatusHistoryViaEscrow EscrowStatusHistory[] @relation("EscrowStatusHistory_escrow")
+
+  @@unique([id, currency])
+  @@index([clientId, createdAt])
+  @@index([providerId, createdAt])
+  @@map("escrow")
+}
+
+model EscrowParticipant {
+  id        String   @id @default(uuid())
+  escrowId  String   @map("escrow_id")
+  userId    String   @map("user_id")
+  role      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  escrow Escrow @relation("EscrowParticipant_escrow", fields: [escrowId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  user   User   @relation("EscrowParticipant_user", fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([escrowId, userId, role])
+  @@index([userId])
+  @@map("escrow_participant")
+}
+
+model Account {
+  id        String        @id @default(uuid())
+  userId    String?       @map("user_id")
+  escrowId  String?       @unique @map("escrow_id")
+  type      AccountType
+  status    AccountStatus @default(ACTIVE)
+  currency  String        @default("INR") @db.VarChar(3)
+  updatedAt DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdAt DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user                      User?         @relation("Account_user", fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  escrow                    Escrow?       @relation("Account_escrow", fields: [escrowId, currency], references: [id, currency], onDelete: Restrict, onUpdate: Restrict)
+  transactionViaSource      Transaction[] @relation("Transaction_source")
+  transactionViaDestination Transaction[] @relation("Transaction_destination")
+  ledgerEntryViaAccount     LedgerEntry[] @relation("LedgerEntry_account")
+
+  @@unique([id, currency])
+  @@unique([userId, currency])
+  @@unique([escrowId, currency])
+  @@map("account")
+}
+
+model Milestone {
+  id             String          @id @default(uuid())
+  escrowId       String          @map("escrow_id")
+  title          String
+  description    String          @default("")
+  amount         Decimal         @db.Decimal(30, 8)
+  status         LifecycleStatus @default(CREATED)
+  order          Int
+  reviewFeedback String?         @map("review_feedback")
+  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  escrow                             Escrow                   @relation("Milestone_escrow", fields: [escrowId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  milestoneSubmissionViaMilestone    MilestoneSubmission[]    @relation("MilestoneSubmission_milestone")
+  transactionViaMilestone            Transaction[]            @relation("Transaction_milestone")
+  disputeViaMilestone                Dispute[]                @relation("Dispute_milestone")
+  milestoneStatusHistoryViaMilestone MilestoneStatusHistory[] @relation("MilestoneStatusHistory_milestone")
+
+  @@unique([escrowId, order])
+  @@unique([id, escrowId])
+  @@map("milestone")
+}
+
+model MilestoneSubmission {
+  id             String    @id @default(uuid())
+  milestoneId    String    @map("milestone_id")
+  submittedBy    String    @map("submitted_by")
+  submittedAt    DateTime  @map("submitted_at") @db.Timestamptz(3)
+  attachments    Json
+  reviewedBy     String?   @map("reviewed_by")
+  reviewedAt     DateTime? @map("reviewed_at") @db.Timestamptz(3)
+  reviewFeedback String?   @map("review_feedback")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  milestone Milestone @relation("MilestoneSubmission_milestone", fields: [milestoneId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  submitter User      @relation("MilestoneSubmission_submitter", fields: [submittedBy], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  reviewer  User?     @relation("MilestoneSubmission_reviewer", fields: [reviewedBy], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([milestoneId, submittedAt])
+  @@map("milestone_submission")
+}
+
+model EscrowCondition {
+  id                  String          @id @default(uuid())
+  escrowId            String          @map("escrow_id")
+  title               String
+  description         String          @default("")
+  type                ConditionType
+  config              Json            @default("{}")
+  required            Boolean         @default(true)
+  status              ConditionStatus @default(PENDING)
+  satisfiedAt         DateTime?       @map("satisfied_at") @db.Timestamptz(3)
+  satisfiedBy         String?         @map("satisfied_by")
+  satisfiedBySystem   Boolean         @default(false) @map("satisfied_by_system")
+  submittedAt         DateTime?       @map("submitted_at") @db.Timestamptz(3)
+  submittedBy         String?         @map("submitted_by")
+  verificationDetails Json?           @map("verification_details")
+  updatedAt           DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdAt           DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  escrow    Escrow @relation("EscrowCondition_escrow", fields: [escrowId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  satisfier User?  @relation("EscrowCondition_satisfier", fields: [satisfiedBy], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  submitter User?  @relation("EscrowCondition_submitter", fields: [submittedBy], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([escrowId, createdAt])
+  @@map("escrow_condition")
+}
+
+model Transaction {
+  id             String            @id @default(uuid())
+  escrowId       String?           @map("escrow_id")
+  milestoneId    String?           @map("milestone_id")
+  resolutionId   String?           @map("resolution_id")
+  fromAccountId  String            @map("from_account_id")
+  toAccountId    String            @map("to_account_id")
+  type           TransactionType
+  status         TransactionStatus @default(PENDING)
+  amount         Decimal           @db.Decimal(30, 8)
+  currency       String            @db.VarChar(3)
+  idempotencyKey String?           @unique @map("idempotency_key")
+  requestShape   String?           @map("request_shape")
+  updatedAt      DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  escrow                                    Escrow?                       @relation("Transaction_escrow", fields: [escrowId, currency], references: [id, currency], onDelete: Restrict, onUpdate: Restrict)
+  milestone                                 Milestone?                    @relation("Transaction_milestone", fields: [milestoneId, escrowId], references: [id, escrowId], onDelete: Restrict, onUpdate: Restrict)
+  resolution                                DisputeResolution?            @relation("Transaction_resolution", fields: [resolutionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  source                                    Account                       @relation("Transaction_source", fields: [fromAccountId, currency], references: [id, currency], onDelete: Restrict, onUpdate: Restrict)
+  destination                               Account                       @relation("Transaction_destination", fields: [toAccountId, currency], references: [id, currency], onDelete: Restrict, onUpdate: Restrict)
+  ledgerEntryViaTransaction                 LedgerEntry[]                 @relation("LedgerEntry_transaction")
+  disputeResolutionAllocationViaTransaction DisputeResolutionAllocation[] @relation("DisputeResolutionAllocation_transaction")
+
+  @@unique([id, currency])
+  @@unique([id, resolutionId, toAccountId, currency, type, amount], map: "transaction_resolution_allocation_key")
+  @@index([escrowId, createdAt])
+  @@index([milestoneId, createdAt])
+  @@index([fromAccountId, createdAt])
+  @@index([toAccountId, createdAt])
+  @@map("transaction")
+}
+
+model LedgerEntry {
+  id            String    @id @default(uuid())
+  transactionId String    @map("transaction_id")
+  accountId     String    @map("account_id")
+  type          EntryType
+  amount        Decimal   @db.Decimal(30, 8)
+  balance       Decimal   @db.Decimal(30, 8)
+  currency      String    @db.VarChar(3)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  transaction Transaction @relation("LedgerEntry_transaction", fields: [transactionId, currency], references: [id, currency], onDelete: Restrict, onUpdate: Restrict)
+  account     Account     @relation("LedgerEntry_account", fields: [accountId, currency], references: [id, currency], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([transactionId, type])
+  @@index([accountId, createdAt])
+  @@map("ledger_entry")
+}
+
+model Dispute {
+  id                  String        @id @default(uuid())
+  escrowId            String        @map("escrow_id")
+  milestoneId         String?       @map("milestone_id")
+  raisedBy            String        @map("raised_by")
+  title               String
+  category            String
+  reason              String
+  requestedResolution String        @map("requested_resolution")
+  status              DisputeStatus @default(OPEN)
+  resolvedAt          DateTime?     @map("resolved_at") @db.Timestamptz(3)
+  updatedAt           DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdAt           DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  escrow                         Escrow                 @relation("Dispute_escrow", fields: [escrowId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  milestone                      Milestone?             @relation("Dispute_milestone", fields: [milestoneId, escrowId], references: [id, escrowId], onDelete: Restrict, onUpdate: Restrict)
+  raiser                         User                   @relation("Dispute_raiser", fields: [raisedBy], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  disputeEvidenceViaDispute      DisputeEvidence[]      @relation("DisputeEvidence_dispute")
+  disputeMessageViaDispute       DisputeMessage[]       @relation("DisputeMessage_dispute")
+  disputeResolutionViaDispute    DisputeResolution[]    @relation("DisputeResolution_dispute")
+  disputeStatusHistoryViaDispute DisputeStatusHistory[] @relation("DisputeStatusHistory_dispute")
+
+  @@index([escrowId, createdAt])
+  @@map("dispute")
+}
+
+model DisputeEvidence {
+  id          String       @id @default(uuid())
+  disputeId   String       @map("dispute_id")
+  uploadedBy  String       @map("uploaded_by")
+  type        EvidenceType
+  description String       @default("")
+  fileName    String       @map("file_name")
+  storageKey  String       @unique @map("storage_key")
+  mimeType    String       @map("mime_type")
+  fileSize    Int          @map("file_size")
+  fileHash    String       @map("file_hash")
+  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  dispute  Dispute @relation("DisputeEvidence_dispute", fields: [disputeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  uploader User    @relation("DisputeEvidence_uploader", fields: [uploadedBy], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([disputeId, createdAt])
+  @@map("dispute_evidence")
+}
+
+model DisputeMessage {
+  id        String   @id @default(uuid())
+  disputeId String   @map("dispute_id")
+  senderId  String   @map("sender_id")
+  message   String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  dispute Dispute @relation("DisputeMessage_dispute", fields: [disputeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  sender  User    @relation("DisputeMessage_sender", fields: [senderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([disputeId, createdAt])
+  @@map("dispute_message")
+}
+
+model DisputeResolution {
+  id                     String             @id @default(uuid())
+  disputeId              String             @map("dispute_id")
+  resolvedBy             String             @map("resolved_by")
+  decision               ResolutionDecision
+  reasoning              String
+  idempotencyKey         String             @map("idempotency_key")
+  requestShape           String             @map("request_shape")
+  executionStatus        ResolutionStatus   @default(PENDING) @map("execution_status")
+  remainingEscrowBalance Decimal?           @map("remaining_escrow_balance") @db.Decimal(30, 8)
+  updatedAt              DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdAt              DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  transactionViaResolution                 Transaction[]                 @relation("Transaction_resolution")
+  dispute                                  Dispute                       @relation("DisputeResolution_dispute", fields: [disputeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  resolver                                 User                          @relation("DisputeResolution_resolver", fields: [resolvedBy], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  disputeResolutionAllocationViaResolution DisputeResolutionAllocation[] @relation("DisputeResolutionAllocation_resolution")
+  disputeStatusHistoryViaResolution        DisputeStatusHistory[]        @relation("DisputeStatusHistory_resolution")
+
+  @@unique([disputeId, idempotencyKey])
+  @@unique([id, disputeId])
+  @@index([disputeId, createdAt])
+  @@map("dispute_resolution")
+}
+
+model DisputeResolutionAllocation {
+  id                 String          @id @default(uuid())
+  resolutionId       String          @map("resolution_id")
+  transactionId      String          @unique @map("transaction_id")
+  recipientAccountId String          @map("recipient_account_id")
+  amount             Decimal         @db.Decimal(30, 8)
+  currency           String          @db.VarChar(3)
+  type               TransactionType
+  createdAt          DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  resolution  DisputeResolution @relation("DisputeResolutionAllocation_resolution", fields: [resolutionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  transaction Transaction       @relation("DisputeResolutionAllocation_transaction", fields: [transactionId, resolutionId, recipientAccountId, currency, type, amount], references: [id, resolutionId, toAccountId, currency, type, amount], onDelete: Restrict, onUpdate: Restrict, map: "allocation_transfer_match_fkey")
+
+  @@index([resolutionId])
+  @@map("dispute_resolution_allocation")
+}
+
+model EscrowStatusHistory {
+  id         String           @id @default(uuid())
+  escrowId   String           @map("escrow_id")
+  changedBy  String?          @map("changed_by")
+  fromStatus LifecycleStatus? @map("from_status")
+  toStatus   LifecycleStatus  @map("to_status")
+  reason     String
+  createdAt  DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  escrow Escrow @relation("EscrowStatusHistory_escrow", fields: [escrowId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  actor  User?  @relation("EscrowStatusHistory_actor", fields: [changedBy], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([escrowId, createdAt])
+  @@map("escrow_status_history")
+}
+
+model MilestoneStatusHistory {
+  id          String           @id @default(uuid())
+  milestoneId String           @map("milestone_id")
+  changedBy   String?          @map("changed_by")
+  fromStatus  LifecycleStatus? @map("from_status")
+  toStatus    LifecycleStatus  @map("to_status")
+  reason      String
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  milestone Milestone @relation("MilestoneStatusHistory_milestone", fields: [milestoneId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  actor     User?     @relation("MilestoneStatusHistory_actor", fields: [changedBy], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([milestoneId, createdAt])
+  @@map("milestone_status_history")
+}
+
+model DisputeStatusHistory {
+  id           String         @id @default(uuid())
+  disputeId    String         @map("dispute_id")
+  changedBy    String         @map("changed_by")
+  fromStatus   DisputeStatus? @map("from_status")
+  toStatus     DisputeStatus  @map("to_status")
+  reason       String
+  eventType    HistoryEvent   @map("event_type")
+  resolutionId String?        @map("resolution_id")
+  createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  dispute    Dispute            @relation("DisputeStatusHistory_dispute", fields: [disputeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  actor      User               @relation("DisputeStatusHistory_actor", fields: [changedBy], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  resolution DisputeResolution? @relation("DisputeStatusHistory_resolution", fields: [resolutionId, disputeId], references: [id, disputeId], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([disputeId, createdAt])
+  @@map("dispute_status_history")
+}

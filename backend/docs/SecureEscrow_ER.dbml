@@ -1,0 +1,446 @@
+Project SecureEscrow {
+  database_type: 'PostgreSQL'
+  Note: 'See DATABASE_DESIGN.md for partial indexes, checks and ledger triggers.'
+}
+
+Enum Role {
+  CLIENT
+  PROVIDER
+  ADMIN
+}
+
+Enum LifecycleStatus {
+  CREATED
+  FUNDED
+  IN_PROGRESS
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  RELEASED
+  CANCELLED
+  DISPUTED
+  RESOLVED
+  EXPIRED
+}
+
+Enum ReleaseModel {
+  MILESTONE_BASED
+  CONDITION_BASED
+}
+
+Enum ReleasePolicy {
+  ALL_REQUIRED
+}
+
+Enum AccountType {
+  PERSONAL
+  ESCROW
+  EXTERNAL
+}
+
+Enum AccountStatus {
+  ACTIVE
+  INACTIVE
+}
+
+Enum ConditionType {
+  CLIENT_APPROVAL
+  WORK_SUBMITTED
+  DEADLINE_REACHED
+  PARTICIPANT_APPROVAL
+  EVIDENCE_SUBMITTED
+  DELIVERY_CONFIRMED
+  EXTERNAL_VERIFICATION
+  CUSTOM
+}
+
+Enum ConditionStatus {
+  PENDING
+  SUBMITTED
+  REJECTED
+  SATISFIED
+}
+
+Enum TransactionType {
+  FUND
+  RELEASE
+  REFUND
+  DEPOSIT
+  WITHDRAWAL
+}
+
+Enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+Enum EntryType {
+  DEBIT
+  CREDIT
+}
+
+Enum DisputeStatus {
+  OPEN
+  EVIDENCE_SUBMISSION
+  UNDER_REVIEW
+  RESOLVED
+}
+
+Enum EvidenceType {
+  PDF
+  JPEG
+  PNG
+}
+
+Enum ResolutionDecision {
+  RELEASE_TO_PROVIDER
+  REFUND_TO_CLIENT
+  SPLIT_FUNDS
+  PARTIAL_RELEASE
+}
+
+Enum ResolutionStatus {
+  PENDING
+  PARTIAL
+  COMPLETED
+}
+
+Enum HistoryEvent {
+  STATUS_TRANSITION
+  RESOLUTION_EXECUTED
+  RESOLUTION_FAILED
+}
+
+Table user {
+  id text [pk, not null]
+  username text [unique]
+  email text [unique]
+  name text [null]
+  password_hash text [null]
+  role Role [not null]
+  is_active boolean [not null, default: true]
+  updated_at timestamptz(3) [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+}
+
+Table escrow {
+  id text [pk, not null]
+  client_id text [not null]
+  provider_id text [not null]
+  title text [not null]
+  description text [not null, default: '']
+  total_amount decimal(30,8) [not null]
+  currency varchar(3) [not null, default: 'INR']
+  status LifecycleStatus [not null, default: 'CREATED']
+  status_before_dispute LifecycleStatus [null]
+  release_model ReleaseModel [not null]
+  release_policy ReleasePolicy [not null, default: 'ALL_REQUIRED']
+  agreement_type text [not null, default: 'GENERAL']
+  terms text [not null, default: '']
+  metadata jsonb [not null, default: '{}']
+  updated_at timestamptz(3) [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (client_id, created_at)
+    (provider_id, created_at)
+    (id, currency) [unique]
+  }
+}
+
+Table escrow_participant {
+  id text [pk, not null]
+  escrow_id text [not null]
+  user_id text [not null]
+  role text [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (escrow_id, user_id, role) [unique]
+    user_id
+  }
+}
+
+Table account {
+  id text [pk, not null]
+  user_id text [null]
+  escrow_id text [unique]
+  type AccountType [not null]
+  status AccountStatus [not null, default: 'ACTIVE']
+  currency varchar(3) [not null, default: 'INR']
+  updated_at timestamptz(3) [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (id, currency) [unique]
+    (user_id, currency) [unique]
+    (escrow_id, currency) [unique]
+  }
+}
+
+Table milestone {
+  id text [pk, not null]
+  escrow_id text [not null]
+  title text [not null]
+  description text [not null, default: '']
+  amount decimal(30,8) [not null]
+  status LifecycleStatus [not null, default: 'CREATED']
+  order integer [not null]
+  review_feedback text [null]
+  updated_at timestamptz(3) [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (escrow_id, order) [unique]
+    (id, escrow_id) [unique]
+  }
+}
+
+Table milestone_submission {
+  id text [pk, not null]
+  milestone_id text [not null]
+  submitted_by text [not null]
+  submitted_at timestamptz(3) [not null]
+  attachments jsonb [not null]
+  reviewed_by text [null]
+  reviewed_at timestamptz(3) [null]
+  review_feedback text [null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (milestone_id, submitted_at)
+  }
+}
+
+Table escrow_condition {
+  id text [pk, not null]
+  escrow_id text [not null]
+  title text [not null]
+  description text [not null, default: '']
+  type ConditionType [not null]
+  config jsonb [not null, default: '{}']
+  required boolean [not null, default: true]
+  status ConditionStatus [not null, default: 'PENDING']
+  satisfied_at timestamptz(3) [null]
+  satisfied_by text [null]
+  satisfied_by_system boolean [not null, default: false]
+  submitted_at timestamptz(3) [null]
+  submitted_by text [null]
+  verification_details jsonb [null]
+  updated_at timestamptz(3) [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (escrow_id, created_at)
+  }
+}
+
+Table transaction {
+  id text [pk, not null]
+  escrow_id text [null]
+  milestone_id text [null]
+  resolution_id text [null]
+  from_account_id text [not null]
+  to_account_id text [not null]
+  type TransactionType [not null]
+  status TransactionStatus [not null, default: 'PENDING']
+  amount decimal(30,8) [not null]
+  currency varchar(3) [not null]
+  idempotency_key text [unique]
+  request_shape text [null]
+  updated_at timestamptz(3) [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (escrow_id, created_at)
+    (milestone_id, created_at)
+    (from_account_id, created_at)
+    (to_account_id, created_at)
+    (id, currency) [unique]
+    (id, resolution_id, to_account_id, currency, type, amount) [unique, name: 'transaction_resolution_allocation_key']
+  }
+}
+
+Table ledger_entry {
+  id text [pk, not null]
+  transaction_id text [not null]
+  account_id text [not null]
+  type EntryType [not null]
+  amount decimal(30,8) [not null]
+  balance decimal(30,8) [not null]
+  currency varchar(3) [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (transaction_id, type) [unique]
+    (account_id, created_at)
+  }
+}
+
+Table dispute {
+  id text [pk, not null]
+  escrow_id text [not null]
+  milestone_id text [null]
+  raised_by text [not null]
+  title text [not null]
+  category text [not null]
+  reason text [not null]
+  requested_resolution text [not null]
+  status DisputeStatus [not null, default: 'OPEN']
+  resolved_at timestamptz(3) [null]
+  updated_at timestamptz(3) [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (escrow_id, created_at)
+  }
+}
+
+Table dispute_evidence {
+  id text [pk, not null]
+  dispute_id text [not null]
+  uploaded_by text [not null]
+  type EvidenceType [not null]
+  description text [not null, default: '']
+  file_name text [not null]
+  storage_key text [not null, unique]
+  mime_type text [not null]
+  file_size integer [not null]
+  file_hash text [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (dispute_id, created_at)
+  }
+}
+
+Table dispute_message {
+  id text [pk, not null]
+  dispute_id text [not null]
+  sender_id text [not null]
+  message text [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (dispute_id, created_at)
+  }
+}
+
+Table dispute_resolution {
+  id text [pk, not null]
+  dispute_id text [not null]
+  resolved_by text [not null]
+  decision ResolutionDecision [not null]
+  reasoning text [not null]
+  idempotency_key text [not null]
+  request_shape text [not null]
+  execution_status ResolutionStatus [not null, default: 'PENDING']
+  remaining_escrow_balance decimal(30,8) [null]
+  updated_at timestamptz(3) [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (dispute_id, idempotency_key) [unique]
+    (id, dispute_id) [unique]
+    (dispute_id, created_at)
+  }
+}
+
+Table dispute_resolution_allocation {
+  id text [pk, not null]
+  resolution_id text [not null]
+  transaction_id text [not null, unique]
+  recipient_account_id text [not null]
+  amount decimal(30,8) [not null]
+  currency varchar(3) [not null]
+  type TransactionType [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    resolution_id
+  }
+}
+
+Table escrow_status_history {
+  id text [pk, not null]
+  escrow_id text [not null]
+  changed_by text [null]
+  from_status LifecycleStatus [null]
+  to_status LifecycleStatus [not null]
+  reason text [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (escrow_id, created_at)
+  }
+}
+
+Table milestone_status_history {
+  id text [pk, not null]
+  milestone_id text [not null]
+  changed_by text [null]
+  from_status LifecycleStatus [null]
+  to_status LifecycleStatus [not null]
+  reason text [not null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (milestone_id, created_at)
+  }
+}
+
+Table dispute_status_history {
+  id text [pk, not null]
+  dispute_id text [not null]
+  changed_by text [not null]
+  from_status DisputeStatus [null]
+  to_status DisputeStatus [not null]
+  reason text [not null]
+  event_type HistoryEvent [not null]
+  resolution_id text [null]
+  created_at timestamptz(3) [not null, default: `now()`]
+
+  indexes {
+    (dispute_id, created_at)
+  }
+}
+
+Ref: escrow.client_id > user.id [delete: restrict, update: restrict]
+Ref: escrow.provider_id > user.id [delete: restrict, update: restrict]
+Ref: escrow_participant.escrow_id > escrow.id [delete: restrict, update: restrict]
+Ref: escrow_participant.user_id > user.id [delete: restrict, update: restrict]
+Ref: account.user_id > user.id [delete: restrict, update: restrict]
+Ref: account.(escrow_id, currency) > escrow.(id, currency) [delete: restrict, update: restrict]
+Ref: milestone.escrow_id > escrow.id [delete: restrict, update: restrict]
+Ref: milestone_submission.milestone_id > milestone.id [delete: restrict, update: restrict]
+Ref: milestone_submission.submitted_by > user.id [delete: restrict, update: restrict]
+Ref: milestone_submission.reviewed_by > user.id [delete: restrict, update: restrict]
+Ref: escrow_condition.escrow_id > escrow.id [delete: restrict, update: restrict]
+Ref: escrow_condition.satisfied_by > user.id [delete: restrict, update: restrict]
+Ref: escrow_condition.submitted_by > user.id [delete: restrict, update: restrict]
+Ref: transaction.(escrow_id, currency) > escrow.(id, currency) [delete: restrict, update: restrict]
+Ref: transaction.(milestone_id, escrow_id) > milestone.(id, escrow_id) [delete: restrict, update: restrict]
+Ref: transaction.resolution_id > dispute_resolution.id [delete: restrict, update: restrict]
+Ref: transaction.(from_account_id, currency) > account.(id, currency) [delete: restrict, update: restrict]
+Ref: transaction.(to_account_id, currency) > account.(id, currency) [delete: restrict, update: restrict]
+Ref: ledger_entry.(transaction_id, currency) > transaction.(id, currency) [delete: restrict, update: restrict]
+Ref: ledger_entry.(account_id, currency) > account.(id, currency) [delete: restrict, update: restrict]
+Ref: dispute.escrow_id > escrow.id [delete: restrict, update: restrict]
+Ref: dispute.(milestone_id, escrow_id) > milestone.(id, escrow_id) [delete: restrict, update: restrict]
+Ref: dispute.raised_by > user.id [delete: restrict, update: restrict]
+Ref: dispute_evidence.dispute_id > dispute.id [delete: restrict, update: restrict]
+Ref: dispute_evidence.uploaded_by > user.id [delete: restrict, update: restrict]
+Ref: dispute_message.dispute_id > dispute.id [delete: restrict, update: restrict]
+Ref: dispute_message.sender_id > user.id [delete: restrict, update: restrict]
+Ref: dispute_resolution.dispute_id > dispute.id [delete: restrict, update: restrict]
+Ref: dispute_resolution.resolved_by > user.id [delete: restrict, update: restrict]
+Ref: dispute_resolution_allocation.resolution_id > dispute_resolution.id [delete: restrict, update: restrict]
+Ref allocation_transfer_match_fkey: dispute_resolution_allocation.(transaction_id, resolution_id, recipient_account_id, currency, type, amount) > transaction.(id, resolution_id, to_account_id, currency, type, amount) [delete: restrict, update: restrict]
+Ref: escrow_status_history.escrow_id > escrow.id [delete: restrict, update: restrict]
+Ref: escrow_status_history.changed_by > user.id [delete: restrict, update: restrict]
+Ref: milestone_status_history.milestone_id > milestone.id [delete: restrict, update: restrict]
+Ref: milestone_status_history.changed_by > user.id [delete: restrict, update: restrict]
+Ref: dispute_status_history.dispute_id > dispute.id [delete: restrict, update: restrict]
+Ref: dispute_status_history.changed_by > user.id [delete: restrict, update: restrict]
+Ref: dispute_status_history.(resolution_id, dispute_id) > dispute_resolution.(id, dispute_id) [delete: restrict, update: restrict]
