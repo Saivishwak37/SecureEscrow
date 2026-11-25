@@ -828,7 +828,7 @@ function MilestoneCard({ milestone, role, onAction, loadingAction }: {
         <div>
           <p className="text-xs text-slate-400 font-mono font-medium mb-0.5">{shortId(milestone.id)}</p>
           <h3 className="text-base font-semibold text-slate-900">{milestone.title}</h3>
-          {milestone.description && <p className="text-xs text-slate-500 mt-0.5">{milestone.description}</p>}
+          {milestone.description && <p className="mt-0.5 whitespace-pre-wrap break-words text-xs text-slate-500">{milestone.description}</p>}
         </div>
         <div className="text-right flex-shrink-0 ml-4">
           <p className="text-xl font-bold font-mono text-slate-900">{fmt(milestone.amount)}</p>
@@ -1569,10 +1569,44 @@ interface MilestoneForm { id: string; title: string; amount: string; description
 
 // Agreement setup supports the existing milestone path and the stored
 // condition-based release configuration.
-export function CreateEscrowModal({ open, onClose, onCreated, clientId, providerUsers }: {
+const amountScale = 100_000_000n
+const maxEscrowUnits = 50_000_000n * amountScale
+
+function escrowUnits(value: string): bigint | null {
+  const decimal = value.trim()
+  if (!/^(?:0*\d{1,8}(?:\.\d{0,8})?|\.\d{1,8})$/.test(decimal)) return null
+  const [whole, fraction = ""] = decimal.split(".")
+  const units = BigInt(whole || "0") * amountScale + BigInt(fraction.padEnd(8, "0"))
+  return units > 0n && units <= maxEscrowUnits ? units : null
+}
+
+function escrowDecimal(units: bigint): string {
+  const fraction = (units % amountScale).toString().padStart(8, "0").replace(/0+$/, "")
+  return `${units / amountScale}${fraction ? `.${fraction}` : ""}`
+}
+
+function milestoneGenerationError(error: unknown): string {
+  if (error instanceof api.ApiError) {
+    if (error.status === 401) return "Your session has expired. Sign in to generate milestones."
+    if (error.status === 403) return "Only clients can generate milestones."
+    if (error.status === 400) return "Check the work description, agreement amount, title and duration."
+    if (error.status === 429) return "Too many generation requests. Wait before trying again."
+    switch (error.code) {
+      case "AI_TIMEOUT": return "Milestone generation timed out. Try again or enter milestones manually."
+      case "AI_QUOTA_EXCEEDED": return "The AI service has reached its quota. Try again later or enter milestones manually."
+      case "AI_INVALID_OUTPUT": return "The AI service returned an invalid plan. Try again or enter milestones manually."
+      case "AI_UNAVAILABLE": return "AI generation is currently unavailable. You can enter milestones manually."
+      case "NETWORK_ERROR": return "Could not reach SecureEscrow. Check your connection and try again."
+    }
+  }
+  return "Could not generate milestones. Try again or enter milestones manually."
+}
+
+export function CreateEscrowModal({ open, onClose, onCreated, clientId, providerUsers, providersLoading, retryProviders }: {
   open: boolean; onClose: () => void
   onCreated: (escrowId: string, meta: { domain: string; releaseModel: ReleaseModel }) => void
   clientId: string; providerUsers: BackendUser[]
+  providersLoading?: boolean; retryProviders?: () => void
 }) {
   const [form, setForm] = useState({
     title: "",
@@ -1591,16 +1625,46 @@ export function CreateEscrowModal({ open, onClose, onCreated, clientId, provider
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [providerSearch, setProviderSearch] = useState("")
-  const setF = (k: string, v: string) => setForm(f => ({ ...f, [k]: v }))
-  const updateM = (id: string, k: keyof MilestoneForm, v: string) => setMilestones(m => m.map(x => x.id === id ? { ...x, [k]: v } : x))
+  const [assistantOpen, setAssistantOpen] = useState(false)
+  const [workDescription, setWorkDescription] = useState("")
+  const [duration, setDuration] = useState("")
+  const [activeGeneration, setActiveGeneration] = useState<AbortController | null>(null)
+  const [generationError, setGenerationError] = useState<string | null>(null)
+  const [assumptions, setAssumptions] = useState<string[] | null>(null)
+  const generation = useRef<AbortController | null>(null)
+  const generating = Boolean(activeGeneration && !activeGeneration.signal.aborted)
+  const invalidateGeneration = () => {
+    const active = generation.current
+    generation.current = null
+    active?.abort()
+    setActiveGeneration(null)
+    setGenerationError(null)
+  }
+  const setF = (k: string, v: string) => {
+    invalidateGeneration()
+    setForm(f => ({ ...f, [k]: v }))
+  }
+  const editMilestones = (update: (draft: MilestoneForm[]) => MilestoneForm[]) => {
+    invalidateGeneration()
+    setMilestones(update)
+  }
+  const updateM = (id: string, k: keyof MilestoneForm, v: string) => editMilestones(m => m.map(x => x.id === id ? { ...x, [k]: v } : x))
   const updateConditionDraft = (draftId: string, draft: ConditionDraft) => setConditions(items => items.map(item => item.draftId === draftId ? { ...draft, draftId } : item))
   const conditionInput = (draft: ConditionDraft): api.ConditionInput => {
     const config = { ...draft.config }
     if (draft.type === "DEADLINE_REACHED" && config.deadline) config.deadline = new Date(String(config.deadline)).toISOString()
     return { title: draft.title.trim(), description: draft.description.trim(), type: draft.type, required: draft.required, config }
   }
-  const milestoneTotal = milestones.reduce((s, m) => s + (parseFloat(m.amount) || 0), 0)
-  const totalAmount = parseFloat(form.totalAmount) || 0
+  const agreementUnits = escrowUnits(form.totalAmount)
+  const milestoneUnits = milestones.reduce((sum, m) => sum + (escrowUnits(m.amount) ?? 0n), 0n)
+  const totalAmount = form.releaseModel === "Milestone Based"
+    ? Number(escrowDecimal(agreementUnits ?? 0n))
+    : parseFloat(form.totalAmount) || 0
+  const projectDays = duration === "" ? undefined : Number(duration)
+  const providerId = form.providerId || providerUsers[0]?.id || ""
+  const canGenerate = Boolean(agreementUnits && workDescription.trim() && workDescription.trim().length <= 4000
+    && form.title.trim().length <= 120
+    && (projectDays === undefined || (Number.isInteger(projectDays) && projectDays >= 1 && projectDays <= 3650)))
   const inputCls = "w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all placeholder:text-slate-400"
   const filteredProviders = providerUsers.filter(provider => {
     const search = providerSearch.trim().toLowerCase()
@@ -1609,15 +1673,66 @@ export function CreateEscrowModal({ open, onClose, onCreated, clientId, provider
   })
 
   useEffect(() => {
-    if (open && !form.providerId && providerUsers.length > 0) setF("providerId", providerUsers[0].id)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, providerUsers])
+    return () => {
+      const active = generation.current
+      generation.current = null
+      active?.abort()
+    }
+  }, [open])
+
+  const handleGenerate = async () => {
+    if (!canGenerate || !agreementUnits || submitting || generation.current) return
+    if ((assumptions || milestones.some(m => m.title.trim() || m.amount || m.description.trim()))
+      && !window.confirm("Replace the current milestones with a new AI-generated plan?")) return
+    const active = new AbortController()
+    generation.current = active
+    setActiveGeneration(active)
+    setGenerationError(null)
+    try {
+      const draft = await api.generateMilestones({
+        title: form.title.trim() || undefined,
+        description: workDescription.trim(),
+        totalAmount: escrowDecimal(agreementUnits),
+        durationDays: projectDays,
+      }, active.signal)
+      if (generation.current !== active) return
+      const rows = draft.milestones.map(m => ({
+        id: genId(), title: m.title, description: m.description, amount: m.amount.toFixed(8),
+      }))
+      const allocations = rows.map(m => escrowUnits(m.amount))
+      if (!rows.length || allocations.some(units => units === null)
+        || escrowUnits(draft.totalAmount.toFixed(8)) !== agreementUnits
+        || allocations.reduce<bigint>((sum, units) => sum + (units ?? 0n), 0n) !== agreementUnits) {
+        setGenerationError("The generated plan does not match the agreement amount. Try again or enter milestones manually.")
+        return
+      }
+      setMilestones(rows.map((m, index) => ({ ...m, amount: escrowDecimal(allocations[index]!) })))
+      setForm(current => ({
+        ...current,
+        title: current.title.trim() ? current.title : draft.title,
+        description: current.description.trim() ? current.description : draft.description,
+      }))
+      setAssumptions(draft.assumptions)
+    } catch (err) {
+      if (generation.current === active) setGenerationError(milestoneGenerationError(err))
+    } finally {
+      if (generation.current === active) {
+        generation.current = null
+        setActiveGeneration(null)
+      }
+    }
+  }
 
   const resetForm = () => {
+    invalidateGeneration()
+    setAssistantOpen(false)
+    setWorkDescription("")
+    setDuration("")
+    setAssumptions(null)
     setForm({
       title: "",
       description: "",
-      providerId: providerUsers[0]?.id ?? "",
+      providerId: "",
       domain: "Freelancing",
       releaseModel: "Milestone Based",
       totalAmount: "",
@@ -1638,6 +1753,8 @@ export function CreateEscrowModal({ open, onClose, onCreated, clientId, provider
     if (next === form.releaseModel) return
     const currentCount = form.releaseModel === "Milestone Based" ? milestones.length : conditions.length
     if (currentCount && !window.confirm(`Switching to ${next} clears the current ${form.releaseModel === "Milestone Based" ? "milestone configuration" : "condition configuration"}. Continue?`)) return
+    invalidateGeneration()
+    setAssumptions(null)
     if (next === "Condition Based") { setMilestones([]); setConditions([]) }
     else { setConditions([]); setMilestones([{ id: genId(), title: "", amount: "", description: "" }]) }
     setForm(current => ({ ...current, releaseModel: next }))
@@ -1645,12 +1762,14 @@ export function CreateEscrowModal({ open, onClose, onCreated, clientId, provider
   }
 
   const handleSubmit = async () => {
-    if (!form.providerId) { setError("Select a provider for this escrow."); return }
-    if (form.releaseModel === "Milestone Based" && milestones.some(m => !m.title.trim() || !m.description.trim() || !Number.isFinite(parseFloat(m.amount)) || parseFloat(m.amount) <= 0)) { setError("Every milestone needs a title, description, and positive amount."); return }
-    if (form.releaseModel === "Milestone Based" && Math.abs(milestoneTotal - totalAmount) > 0.000001) { setError("Milestone amounts must equal the agreement amount."); return }
+    if (!providerId) { setError("Select a provider for this escrow."); return }
+    if (form.releaseModel === "Milestone Based" && !agreementUnits) { setError("Enter a positive agreement amount up to ₹50,000,000 with at most eight decimal places."); return }
+    if (form.releaseModel === "Milestone Based" && milestones.some(m => !m.title.trim() || !m.description.trim() || !escrowUnits(m.amount))) { setError("Every milestone needs a title, description, and positive amount with at most eight decimal places."); return }
+    if (form.releaseModel === "Milestone Based" && milestoneUnits !== agreementUnits) { setError("Milestone amounts must equal the agreement amount."); return }
     if (form.releaseModel === "Condition Based" && conditions.length === 0) { setError("Add at least one release condition."); return }
     if (form.releaseModel === "Condition Based" && conditions.some(c => !c.title.trim() || !c.description.trim() || (c.type === "DEADLINE_REACHED" && (!c.config.deadline || Number.isNaN(Date.parse(String(c.config.deadline))))) || (c.type === "EXTERNAL_VERIFICATION" && !String(c.config.verificationSource ?? "").trim()))) { setError("Complete each condition title, description, and required configuration."); return }
     if (totalAmount <= 0) { setError("Enter an escrow amount greater than 0."); return }
+    invalidateGeneration()
     setSubmitting(true)
     setError(null)
     try {
@@ -1659,8 +1778,8 @@ export function CreateEscrowModal({ open, onClose, onCreated, clientId, provider
         title: form.title || "New Escrow",
         description: form.description,
         clientId,
-        freelancerId: form.providerId,
-        participants: [{ userId: clientId, role: "PAYER" }, { userId: form.providerId, role: "PAYEE" }],
+        freelancerId: providerId,
+        participants: [{ userId: clientId, role: "PAYER" }, { userId: providerId, role: "PAYEE" }],
         totalAmount,
         releaseModel: form.releaseModel === "Milestone Based" ? "MILESTONE_BASED" : "CONDITION_BASED",
         ...(form.releaseModel === "Milestone Based" ? { milestones: milestones.map(m => ({ title: m.title, description: m.description, amount: Number(m.amount) })) } : {}),
@@ -1686,7 +1805,7 @@ export function CreateEscrowModal({ open, onClose, onCreated, clientId, provider
     <Modal open={open} onClose={handleClose} wide>
       <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between">
         <div><h2 className="font-bold text-slate-900">Create Escrow</h2><p className="text-xs text-slate-400 mt-0.5">Configure a new escrow agreement</p></div>
-        <button onClick={handleClose} className="text-slate-400 hover:text-slate-600"><XIcon /></button>
+        <button aria-label="Close Create Escrow" onClick={handleClose} className="text-slate-400 hover:text-slate-600"><XIcon /></button>
       </div>
       <div className="px-6 py-5 space-y-5 max-h-[70vh] overflow-y-auto">
         {error && (
@@ -1696,7 +1815,7 @@ export function CreateEscrowModal({ open, onClose, onCreated, clientId, provider
         )}
         <div className="grid grid-cols-2 gap-4">
           <div className="col-span-2"><label className="block text-xs font-medium text-slate-600 mb-1.5">Escrow Title</label><input className={inputCls} placeholder="e.g. Website Development" value={form.title} onChange={e => setF("title", e.target.value)} /></div>
-          <div className="col-span-2"><label className="block text-xs font-medium text-slate-600 mb-1.5">Description</label><textarea className={`${inputCls} resize-none`} rows={2} value={form.description} onChange={e => setF("description", e.target.value)} /></div>
+          <label className="col-span-2 block text-xs font-medium text-slate-600">Description<textarea className={`${inputCls} mt-1.5 resize-none`} rows={2} value={form.description} onChange={e => setF("description", e.target.value)} /></label>
           <div className="col-span-2 grid grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1.5">Domain</label>
@@ -1709,6 +1828,7 @@ export function CreateEscrowModal({ open, onClose, onCreated, clientId, provider
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1.5">Release Model</label>
               <select
+                aria-label="Release model"
                 className={inputCls}
                 value={form.releaseModel}
                 onChange={e => changeReleaseModel(e.target.value as ReleaseModel)}
@@ -1722,19 +1842,21 @@ export function CreateEscrowModal({ open, onClose, onCreated, clientId, provider
         <div className="border-t border-slate-100 pt-5">
           <div className="mb-3 flex items-start justify-between gap-3">
             <div><p className="text-sm font-semibold text-slate-800">Choose a provider</p><p className="mt-0.5 text-xs text-slate-500">Select the professional who will deliver this agreement.</p></div>
-            {form.providerId && <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">{providerUsers.length} available</span>}
+            {providerId && <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">{providerUsers.length} available</span>}
           </div>
           <label className="mb-3 block">
             <span className="sr-only">Search providers</span>
             <input aria-label="Search providers" className={inputCls} type="search" value={providerSearch} onChange={event => setProviderSearch(event.target.value)} placeholder="Search by name, username or email" />
           </label>
-          {providerUsers.length === 0 ? <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">No providers are available yet.</div>
+          {providersLoading ? <p role="status" className="py-4 text-sm text-slate-500">Loading providers…</p>
+            : retryProviders ? <div className="space-y-2 py-4"><p role="alert" className="text-sm text-slate-600">Couldn’t load providers.</p><button type="button" className="text-sm font-medium text-blue-700 underline" onClick={retryProviders}>Retry</button></div>
+            : providerUsers.length === 0 ? <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">No providers are available yet.</div>
             : filteredProviders.length === 0 ? <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">No providers match that search.</div>
               : <div role="group" aria-label="Available providers" className="grid max-h-52 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
                 {filteredProviders.map(provider => {
                   const displayName = provider.name?.trim() || provider.username || provider.email || "Provider"
                   const initials = displayName.split(/[\s._-]+/).filter(Boolean).slice(0, 2).map(part => part[0]).join("").toUpperCase()
-                  const selected = form.providerId === provider.id
+                  const selected = providerId === provider.id
                   return <button key={provider.id} type="button" aria-pressed={selected} onClick={() => setF("providerId", provider.id)} className={`flex min-w-0 items-center gap-3 rounded-xl border p-3 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${selected ? "border-blue-500 bg-blue-50 ring-1 ring-blue-200" : "border-slate-200 bg-white hover:border-blue-300 hover:bg-slate-50"}`}>
                     <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-semibold ${selected ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600"}`}>{initials || "P"}</span>
                     <span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold text-slate-800">{displayName}</span><span className="block truncate text-xs text-slate-500">{provider.email || provider.username || "Provider account"}</span></span>
@@ -1755,22 +1877,63 @@ export function CreateEscrowModal({ open, onClose, onCreated, clientId, provider
           <Btn variant="outline" size="sm" onClick={() => { const draftId = genId(); setConditions(items => [...items, { draftId, title: "", description: "", type: "PARTICIPANT_APPROVAL", required: true, config: { actorRole: "PAYER" } }]); setEditingConditionId(draftId) }}><PlusIcon size={12} /> Add Condition</Btn>
         </div>}
         {form.releaseModel === "Milestone Based" && <div className="border-t border-slate-100 pt-5">
-          <label className="block text-xs font-medium text-slate-600 mb-4">Agreement amount (₹)<input className={`${inputCls} mt-1`} type="number" min="0.01" value={form.totalAmount} onChange={e => setF("totalAmount", e.target.value)} /></label>
-          <div className="flex items-center justify-between mb-3">
-            <div><p className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Milestones</p>{totalAmount > 0 && <p className="text-xs text-slate-400 mt-0.5">Total: <span className="font-mono font-medium text-slate-700">{fmt(totalAmount)}</span></p>}</div>
-            <Btn variant="outline" size="sm" onClick={() => setMilestones(m => [...m, { id: genId(), title: "", amount: "", description: "" }])}><PlusIcon size={12} /> Add Milestone</Btn>
+          <label className="block text-xs font-medium text-slate-600 mb-4">Agreement amount (₹)<input className={`${inputCls} mt-1`} inputMode="decimal" value={form.totalAmount} onChange={e => setF("totalAmount", e.target.value)} /></label>
+          {form.totalAmount && !agreementUnits && <p className="mb-3 text-xs text-red-700">Enter a positive amount up to ₹50,000,000 with at most eight decimal places.</p>}
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Milestones</p>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" aria-expanded={assistantOpen} className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-50 focus:ring-2 focus:ring-blue-500" onClick={() => {
+                if (assistantOpen) invalidateGeneration()
+                else if (!workDescription) setWorkDescription(form.description)
+                setAssistantOpen(!assistantOpen)
+              }}>Generate with AI</button>
+              <Btn variant="outline" size="sm" onClick={() => editMilestones(m => [...m, { id: genId(), title: "", amount: "", description: "" }])}><PlusIcon size={12} /> Add Milestone</Btn>
+            </div>
           </div>
+          {assistantOpen && <section aria-label="AI milestone assistant" className="mb-4 space-y-3 rounded-xl border border-blue-200 bg-blue-50 p-4">
+            <h3 className="text-sm font-semibold text-slate-900">AI milestone assistant</h3>
+            <p className="text-xs text-slate-600">Describe the scope and expected results. You can edit every suggestion before creating the agreement.</p>
+            <p className="text-xs text-slate-700">An external AI service processes the work description, agreement title, budget and optional duration. Leave out secrets and sensitive information.</p>
+            <label className="block text-xs font-medium text-slate-700">Describe the work
+              <textarea className={`${inputCls} mt-1 bg-white`} rows={3} maxLength={4000} value={workDescription}
+                placeholder="For example, inspect and restore two bicycles, then provide a list of replaced parts and proof of delivery."
+                onChange={e => { invalidateGeneration(); setWorkDescription(e.target.value) }} />
+            </label>
+            <label className="block text-xs font-medium text-slate-700 sm:max-w-56">Expected duration in days (optional)
+              <input className={`${inputCls} mt-1 bg-white`} type="number" min="1" max="3650" step="1" value={duration}
+                onChange={e => { invalidateGeneration(); setDuration(e.target.value) }} />
+            </label>
+            {form.title.trim().length > 120 && <p className="text-xs text-red-700">Use 120 characters or fewer in the agreement title for AI generation.</p>}
+            {projectDays !== undefined && (!Number.isInteger(projectDays) || projectDays < 1 || projectDays > 3650)
+              && <p className="text-xs text-red-700">Enter a whole duration from 1 to 3,650 days.</p>}
+            {generationError && <p role="alert" className="text-sm text-red-700">{generationError}</p>}
+            {generating && <p role="status" className="text-sm text-blue-700">Generating milestone suggestions…</p>}
+            <Btn size="sm" onClick={handleGenerate} disabled={!canGenerate || submitting} loading={generating}>
+              {assumptions ? "Regenerate Suggestions" : "Generate Milestones"}
+            </Btn>
+          </section>}
+          {assumptions && <div className="mb-4 space-y-1 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800" role="status">
+            <p>Review and edit the AI-suggested milestones before creating the agreement.</p>
+            {assumptions.length > 0 && <ul aria-label="AI assumptions" className="list-disc pl-4">{assumptions.map((item, index) => <li key={index}>{item}</li>)}</ul>}
+          </div>}
+          {agreementUnits && <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600" aria-live="polite">
+            <span>Agreement ₹{escrowDecimal(agreementUnits)}</span>
+            <span>Allocated ₹{escrowDecimal(milestoneUnits)}</span>
+            {milestoneUnits > agreementUnits
+              ? <span className="font-medium text-red-700">Over budget by ₹{escrowDecimal(milestoneUnits - agreementUnits)}</span>
+              : <span>Unallocated ₹{escrowDecimal(agreementUnits - milestoneUnits)}</span>}
+          </div>}
           <div className="space-y-3">
             {milestones.map((m, i) => (
               <div key={m.id} className="bg-slate-50 rounded-xl border border-slate-200 p-4">
                 <div className="flex items-center justify-between mb-3">
                   <p className="text-xs font-medium text-slate-500">Milestone {i + 1}</p>
-                  <button aria-label="Remove milestone" onClick={() => setMilestones(ms => ms.filter(x => x.id !== m.id))} className="text-slate-400 hover:text-red-500 transition-colors"><TrashIcon /></button>
+                  <button aria-label="Remove milestone" onClick={() => editMilestones(ms => ms.filter(x => x.id !== m.id))} className="text-slate-400 hover:text-red-500 transition-colors"><TrashIcon /></button>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div><label className="block text-xs font-medium text-slate-600 mb-1.5">Title</label><input className={inputCls} placeholder="e.g. Design Phase" value={m.title} onChange={e => updateM(m.id, "title", e.target.value)} /></div>
-                  <div><label className="block text-xs font-medium text-slate-600 mb-1.5">Amount (₹)</label><input className={`${inputCls} font-mono`} type="number" placeholder="0" value={m.amount} onChange={e => updateM(m.id, "amount", e.target.value)} /></div>
-                  <div className="col-span-2"><label className="block text-xs font-medium text-slate-600 mb-1.5">Completion details</label><input className={inputCls} placeholder="What must be completed for approval?" value={m.description} onChange={e => updateM(m.id, "description", e.target.value)} /></div>
+                  <label className="block text-xs font-medium text-slate-600">Amount (₹)<input className={`${inputCls} mt-1.5 font-mono`} inputMode="decimal" placeholder="0" value={m.amount} onChange={e => updateM(m.id, "amount", e.target.value)} /></label>
+                  <label className="col-span-2 block text-xs font-medium text-slate-600">Completion details<textarea className={`${inputCls} mt-1.5`} rows={m.description.includes("\n") ? 7 : 2} placeholder="What must be completed for approval?" value={m.description} onChange={e => updateM(m.id, "description", e.target.value)} /></label>
                 </div>
               </div>
             ))}
@@ -1782,7 +1945,7 @@ export function CreateEscrowModal({ open, onClose, onCreated, clientId, provider
         </div>}
       </div>
       <div className="px-6 py-4 border-t border-slate-100 flex justify-between items-center">
-        {totalAmount > 0 && <p className="text-sm text-slate-500">Total: <span className="font-mono font-semibold text-slate-900">{fmt(totalAmount)}</span></p>}
+        {totalAmount > 0 && <p className="text-sm text-slate-500">Total: <span className="font-mono font-semibold text-slate-900">{form.releaseModel === "Milestone Based" && agreementUnits ? `₹${escrowDecimal(agreementUnits)}` : fmt(totalAmount)}</span></p>}
         <div className="flex gap-2 ml-auto">
           <Btn variant="secondary" onClick={handleClose} disabled={submitting}>Cancel</Btn>
           <Btn onClick={handleSubmit} loading={submitting}>Create Escrow</Btn>
@@ -1850,7 +2013,11 @@ function ReleasePaymentModal({ open, onClose, onConfirm, loading, success, miles
 export default function App() {
   const auth = useAuth()
   // ─── Backend-sourced state ──────────────────────────────────────────────
-  const [users, setUsers] = useState<BackendUser[]>([])
+  const [directory, setDirectory] = useState<{ session: string; users: BackendUser[] | null } | null>(null)
+  const [directoryAttempt, setDirectoryAttempt] = useState(0)
+  const directorySession = auth.user ? auth.token : null
+  const activeDirectory = directory?.session === directorySession ? directory : null
+  const users = useMemo(() => activeDirectory?.users ?? [], [activeDirectory])
 
   const [rawEscrows, setRawEscrows] = useState<api.EscrowWithReleaseItems[]>([])
   const [clientAccount, setClientAccount] = useState<BackendAccount | null>(null)
@@ -1904,12 +2071,29 @@ export default function App() {
   const dismissToast = useCallback((id: string) => setToasts(prev => prev.filter(t => t.id !== id)), [])
 
   // ─── Load real backend users (drives the Account Selection page) ───────
+  useEffect(() => {
+    if (!directorySession) return
+    const controller = new AbortController()
+    void api.getUsers(controller.signal).then(
+      users => {
+        if (!controller.signal.aborted) setDirectory({ session: directorySession, users })
+      },
+      () => {
+        if (!controller.signal.aborted) setDirectory({ session: directorySession, users: null })
+      },
+    )
+    return () => controller.abort()
+  }, [directorySession, directoryAttempt])
+
+  const retryDirectory = () => {
+    setDirectory(null)
+    setDirectoryAttempt(attempt => attempt + 1)
+  }
+
   const handleLogin = useCallback(async (email: string, password: string) => {
     setLoginError(null)
     try {
       await auth.login(email, password)
-      const allUsers = await api.getUsers().catch(() => [])
-      setUsers(allUsers)
       setPage("dashboard")
       setSelectedEscrowId(null)
     } catch (err) {
@@ -2317,6 +2501,8 @@ export default function App() {
       <CreateEscrowModal
         open={showCreateModal} onClose={() => setShowCreateModal(false)} onCreated={handleEscrowCreated}
         clientId={clientUser?.id ?? "user-1"} providerUsers={availableProviders}
+        providersLoading={Boolean(directorySession && !activeDirectory)}
+        retryProviders={activeDirectory?.users === null ? retryDirectory : undefined}
       />
       <ReleasePaymentModal
         open={!!releaseModal} onClose={handleCloseRelease}

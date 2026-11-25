@@ -200,6 +200,34 @@ test('PostgreSQL core application', async t => {
     assert.equal(await db.escrow.count({ where: { clientId: client.id, title } }), 0);
   });
 
+  await t.test('generates an editable draft without writes and accepts it through normal escrow creation', async () => {
+    const generation = request(createPostgresApp(db, { milestoneProvider: async () => JSON.stringify({
+      title: 'Warehouse shelving', description: 'Supply and install the approved shelving.',
+      milestones: [1, 2, 3].map((weight, index) => ({
+        title: `Stage ${index + 1}`, description: 'Inspect the completed work.',
+        allocationWeight: weight, deliverables: ['Inspection record'], acceptanceCriteria: ['Approved dimensions match'],
+      })),
+    }) }));
+    const scope = { clientId: client.id };
+    const counts = () => Promise.all([
+      db.escrow.count({ where: scope }), db.milestone.count({ where: { escrow: scope } }),
+      db.account.count({ where: { OR: [{ userId: client.id }, { escrow: scope }] } }),
+      db.transaction.count({ where: { OR: [{ escrow: scope }, { source: { userId: client.id } }, { destination: { userId: client.id } }] } }),
+      db.ledgerEntry.count({ where: { account: { OR: [{ userId: client.id }, { escrow: scope }] } } }),
+      db.escrowStatusHistory.count({ where: { escrow: scope } }),
+    ]);
+    const before = await counts();
+    const draft = verify(await authorize(generation.post('/api/ai/generate-milestones'), clientToken).send({
+      description: 'Supply and install shelving in three stages', totalAmount: '0.10',
+    }), 200);
+    assert.deepEqual(draft.milestones.map(item => item.amount), [0.02, 0.03, 0.05]);
+    assert.deepEqual(await counts(), before);
+    const saved = verify(await authorize(app.post('/api/escrows'), clientToken).send({ ...draft, providerId: provider.id }), 201);
+    const milestones = await db.milestone.findMany({ where: { escrowId: saved.id }, orderBy: { order: 'asc' } });
+    assert.deepEqual(milestones.map(item => item.amount.toString()), ['0.02', '0.03', '0.05']);
+    assert.ok(milestones[0].description.includes('Acceptance criteria\n- Approved dimensions match'));
+  });
+
   await t.test('reads user, escrow, milestone and condition records after a real backend restart', async () => {
     const first = await startServer();
     const restartInput = input('restart', 'CLIENT');

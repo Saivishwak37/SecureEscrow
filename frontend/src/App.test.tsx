@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import "@testing-library/jest-dom/vitest"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import App, { AdminDisputeManagement, CreateEscrowModal, ConditionManagement, DisputeActivityPanel, DisputeEvidencePanel, EscrowDetailsPage } from "./App"
@@ -18,6 +18,29 @@ afterEach(() => {
 })
 
 describe("dashboard initial data loading", () => {
+  it("loads providers for escrow creation after restoring a client session", async () => {
+    const user = { id: "restored-client", username: "client", email: "client@example.test", role: "CLIENT" as const }
+    window.sessionStorage.setItem(sessionKey, "saved-client-token")
+    vi.spyOn(api, "me").mockResolvedValue(user)
+    const login = vi.spyOn(api, "login")
+    let resolveDirectory!: (users: BackendUser[]) => void
+    const directory = new Promise<BackendUser[]>(resolve => { resolveDirectory = resolve })
+    const getUsers = vi.spyOn(api, "getUsers").mockReturnValue(directory)
+    vi.spyOn(api, "getAllEscrowsWithReleaseItems").mockResolvedValue([])
+    vi.spyOn(api, "getAccountByUserId").mockResolvedValue({ id: "restored-wallet", userId: user.id, balance: 0, currency: "INR", type: "PERSONAL", createdAt: 0 })
+    vi.spyOn(api, "getAllTransactionsForEscrows").mockResolvedValue([])
+    vi.spyOn(api, "getAccountTransactions").mockResolvedValue([])
+    vi.spyOn(api, "getAllLedgerEntriesForTransactions").mockResolvedValue([])
+    render(<AuthProvider><App /></AuthProvider>)
+    fireEvent.click((await screen.findAllByRole("button", { name: /Create Escrow/ }))[0])
+    expect(screen.getByText("Loading providers…")).toBeInTheDocument()
+    expect(screen.queryByText("No providers are available yet.")).not.toBeInTheDocument()
+    resolveDirectory([{ ...provider, name: "Available Provider" }])
+    expect(await screen.findByRole("button", { name: /Available Provider/ })).toBeInTheDocument()
+    expect(getUsers).toHaveBeenCalledTimes(1)
+    expect(login).not.toHaveBeenCalled()
+  })
+
   it("refreshes the held escrow balance on the Accounts page", async () => {
     const user = { id: "held-client", username: "client", email: "client@example.test", role: "CLIENT" as const }
     vi.spyOn(api, "login").mockResolvedValue({ accessToken: "signed-token", user })
@@ -169,6 +192,175 @@ describe("dashboard initial data loading", () => {
     expect(screen.queryByRole("button", { name: /Provider Two/ })).not.toBeInTheDocument()
     await new Promise(resolve => setTimeout(resolve, 25))
     expect(loadEscrows).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("AI milestone assistant", () => {
+  const chosenProvider = { ...provider, id: "payee-2", name: "Bicycle Workshop" }
+  const details = "Restore the brakes.\n\nDeliverables:\n- Parts list\n\nAcceptance criteria:\n- Brakes pass inspection\n\nEstimated duration: 2 days"
+  const draft = {
+    title: "Bicycle restoration", description: "Inspect and restore a bicycle.", totalAmount: 0.3, assumptions: [],
+    milestones: [
+      { title: "Inspection", amount: 0.1, description: "Record the condition." },
+      { title: "Restoration", amount: 0.2, description: details },
+    ],
+  }
+  const change = (input: HTMLElement, value: string) => fireEvent.change(input, { target: { value } })
+  const button = (name: string) => screen.getByRole("button", { name })
+  const amount = () => screen.getByLabelText(/Agreement amount/)
+  const work = () => screen.getByLabelText("Describe the work")
+  const milestoneTitle = () => screen.getAllByPlaceholderText("e.g. Design Phase")
+  const milestoneAmount = () => screen.getAllByPlaceholderText("0")
+  const submit = () => fireEvent.click(button("Create Escrow"))
+  const start = () => fireEvent.click(button("Generate Milestones"))
+
+  function openAssistant(populate = true) {
+    render(<CreateEscrowModal open onClose={vi.fn()} onCreated={vi.fn()} clientId="payer-1" providerUsers={[provider, chosenProvider]} />)
+    fireEvent.click(button("Generate with AI"))
+    if (populate) {
+      change(amount(), "0.30")
+      change(work(), "Inspect and restore a bicycle.")
+    }
+  }
+
+  it("requires valid inputs and offers the assistant only for milestone agreements", () => {
+    openAssistant(false)
+    expect(button("Generate Milestones")).toBeDisabled()
+    change(work(), "Inspect and restore a bicycle.")
+    change(amount(), "0.000000001")
+    expect(button("Generate Milestones")).toBeDisabled()
+    change(amount(), "0.30")
+    const duration = screen.getByLabelText(/Expected duration/)
+    change(duration, "1.5")
+    expect(button("Generate Milestones")).toBeDisabled()
+    change(duration, "5")
+    expect(button("Generate Milestones")).toBeEnabled()
+    vi.stubGlobal("confirm", vi.fn(() => true))
+    change(screen.getByLabelText("Release model"), "Condition Based")
+    expect(screen.queryByRole("button", { name: "Generate with AI" })).not.toBeInTheDocument()
+    expect(screen.getByText("Release Conditions")).toBeInTheDocument()
+  })
+
+  it("uses the authenticated API and submits edited, balanced milestones only on confirmation", async () => {
+    api.setAccessToken("client-token")
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(Response.json({ success: true, data: draft }))
+    vi.stubGlobal("fetch", fetch)
+    const create = vi.spyOn(api, "createEscrow").mockResolvedValue({ id: "escrow-1" } as api.BackendEscrow)
+    openAssistant()
+    const title = screen.getByPlaceholderText("e.g. Website Development")
+    change(title, "My bicycle agreement")
+    change(screen.getByLabelText("Description"), "My original agreement terms")
+    change(screen.getByLabelText(/Expected duration/), "7")
+    fireEvent.click(screen.getByRole("button", { name: /Bicycle Workshop/ }))
+    start()
+    expect(await screen.findByDisplayValue("Restoration")).toBeInTheDocument()
+    expect(fetch).toHaveBeenCalledTimes(1)
+    const [url, request] = fetch.mock.calls[0]
+    expect(url).toBe(`${api.API_BASE_URL}/api/ai/generate-milestones`)
+    expect(new Headers(request?.headers).get("Authorization")).toBe("Bearer client-token")
+    expect(request?.method).toBe("POST")
+    expect(request?.signal).toBeInstanceOf(AbortSignal)
+    expect(JSON.parse(String(request?.body))).toEqual({
+      title: "My bicycle agreement", description: "Inspect and restore a bicycle.", totalAmount: "0.3", durationDays: 7,
+    })
+    expect(create).not.toHaveBeenCalled()
+    expect(title).toHaveValue("My bicycle agreement")
+    expect(screen.getByLabelText("Description")).toHaveValue("My original agreement terms")
+    expect(amount()).toHaveValue("0.30")
+    expect(screen.getByRole("button", { name: /Bicycle Workshop/, pressed: true })).toBeInTheDocument()
+    expect(screen.getByText("Unallocated ₹0")).toBeInTheDocument()
+    change(milestoneTitle()[1], "Final restoration and handover")
+    const completion = screen.getAllByLabelText("Completion details")[1]
+    expect(completion).toHaveValue(details)
+    change(completion, details + "\nInclude a signed checklist.")
+    change(milestoneAmount()[1], "0.20000001")
+    expect(screen.getByText("Over budget by ₹0.00000001")).toBeInTheDocument()
+    submit()
+    expect(screen.getByText("Milestone amounts must equal the agreement amount.")).toBeInTheDocument()
+    expect(create).not.toHaveBeenCalled()
+    change(milestoneAmount()[0], "0.09999999")
+    submit()
+    await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      title: "My bicycle agreement", description: "My original agreement terms", freelancerId: chosenProvider.id, totalAmount: 0.3,
+      milestones: [
+        { title: "Inspection", description: "Record the condition.", amount: 0.09999999 },
+        { title: "Final restoration and handover", description: details + "\nInclude a signed checklist.", amount: 0.20000001 },
+      ],
+    })))
+  })
+
+  it("preserves the existing draft when the suggested amounts do not balance", async () => {
+    vi.spyOn(api, "generateMilestones").mockResolvedValue({ ...draft, milestones: draft.milestones.slice(0, 1) })
+    vi.stubGlobal("confirm", vi.fn(() => true))
+    openAssistant()
+    change(milestoneTitle()[0], "Manual milestone")
+    start()
+    expect(await screen.findByRole("alert")).toHaveTextContent("The generated plan does not match the agreement amount.")
+    expect(milestoneTitle()[0]).toHaveValue("Manual milestone")
+  })
+
+  it("validates replacement confirmation and blocks duplicate requests", async () => {
+    let resolve!: (value: api.GeneratedMilestoneDraft) => void
+    const generate = vi.spyOn(api, "generateMilestones").mockImplementation(() => new Promise(done => { resolve = done }))
+    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValue(true)
+    vi.stubGlobal("confirm", confirm)
+    openAssistant()
+    change(milestoneTitle()[0], "Manual inspection")
+    start()
+    expect(generate).not.toHaveBeenCalled()
+    expect(milestoneTitle()[0]).toHaveValue("Manual inspection")
+    start()
+    expect(button("Generate Milestones")).toBeDisabled()
+    start()
+    expect(generate).toHaveBeenCalledTimes(1)
+    resolve(draft)
+    expect(await screen.findByDisplayValue("Inspection")).toBeInTheDocument()
+    expect(screen.getByPlaceholderText("e.g. Website Development")).toHaveValue(draft.title)
+    expect(screen.getByLabelText("Description")).toHaveValue(draft.description)
+    confirm.mockReturnValueOnce(false)
+    fireEvent.click(button("Regenerate Suggestions"))
+    expect(confirm).toHaveBeenCalledTimes(3)
+    expect(generate).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(["budget", "manual milestone", "release model", "close"])("ignores stale responses after a change to %s", async action => {
+    let resolve!: (value: api.GeneratedMilestoneDraft) => void
+    const generate = vi.spyOn(api, "generateMilestones").mockImplementation(() => new Promise(done => { resolve = done }))
+    vi.stubGlobal("confirm", vi.fn(() => true))
+    openAssistant()
+    start()
+    if (action === "budget") change(amount(), "2")
+    if (action === "manual milestone") change(milestoneTitle()[0], "Keep this edit")
+    if (action === "release model") change(screen.getByLabelText("Release model"), "Condition Based")
+    if (action === "close") fireEvent.click(button("Cancel"))
+    expect(generate.mock.calls[0][1].aborted).toBe(true)
+    await act(async () => { resolve(draft) })
+    expect(screen.queryByDisplayValue("Inspection")).not.toBeInTheDocument()
+    if (action === "manual milestone") expect(milestoneTitle()[0]).toHaveValue("Keep this edit")
+  })
+
+  it.each([
+    ["AI_TIMEOUT", 504, /timed out/],
+    ["AI_RATE_LIMIT", 429, /Too many generation requests/],
+    ["AI_UNAVAILABLE", 503, /currently unavailable/],
+  ])("preserves the draft and permits manual creation after %s", async (code, status, message) => {
+    vi.spyOn(api, "generateMilestones").mockRejectedValue(new api.ApiError("private provider error", code, status))
+    const create = vi.spyOn(api, "createEscrow").mockResolvedValue({ id: "escrow-1" } as api.BackendEscrow)
+    vi.stubGlobal("confirm", vi.fn(() => true))
+    openAssistant()
+    change(milestoneTitle()[0], "Manual restoration")
+    change(milestoneAmount()[0], "0.30")
+    change(screen.getByLabelText("Completion details"), "Signed checklist")
+    start()
+    expect(await screen.findByRole("alert")).toHaveTextContent(message)
+    expect(screen.queryByText("private provider error")).not.toBeInTheDocument()
+    expect(milestoneTitle()[0]).toHaveValue("Manual restoration")
+    expect(amount()).toHaveValue("0.30")
+    expect(work()).toHaveValue("Inspect and restore a bicycle.")
+    submit()
+    await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      releaseModel: "MILESTONE_BASED", milestones: [{ title: "Manual restoration", amount: 0.3, description: "Signed checklist" }],
+    })))
   })
 })
 

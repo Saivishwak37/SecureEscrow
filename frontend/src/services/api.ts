@@ -146,7 +146,7 @@ const post = <T>(path: string, data?: unknown) =>
   request<T>(path, { method: "POST", body: data !== undefined ? JSON.stringify(data) : undefined })
 
 // ─── Users ──────────────────────────────────────────────────────────────────
-export const getUsers = () => get<BackendUser[]>("/api/users")
+export const getUsers = (signal?: AbortSignal) => request<BackendUser[]>("/api/users", { signal })
 export const getUserById = (id: string) => get<BackendUser>(`/api/users/${id}`)
 export const loginDemoUser = (username: string, password: string) => post<BackendUser>("/api/auth/login", { username, password })
 
@@ -166,6 +166,26 @@ export const withdrawFromAccount = (accountId: string, amount: number, key: stri
 // ─── Escrows ────────────────────────────────────────────────────────────────
 export const getEscrows = () => get<BackendEscrow[]>("/api/escrows")
 export const getEscrow = (id: string) => get<BackendEscrow>(`/api/escrows/${id}`)
+export interface MilestoneDraftInput {
+  title?: string
+  description: string
+  totalAmount: string
+  durationDays?: number
+}
+
+export interface GeneratedMilestoneDraft {
+  title: string
+  description: string
+  totalAmount: number
+  assumptions: string[]
+  milestones: { title: string; description: string; amount: number }[]
+}
+
+export const generateMilestones = (data: MilestoneDraftInput, signal: AbortSignal) =>
+  request<GeneratedMilestoneDraft>("/api/ai/generate-milestones", {
+    method: "POST", body: JSON.stringify(data), signal,
+  })
+
 export const createEscrow = (data: {
   title: string; description?: string; clientId?: string; freelancerId?: string; totalAmount: number
   releaseModel?: "MILESTONE_BASED" | "CONDITION_BASED"; conditions?: ConditionInput[]

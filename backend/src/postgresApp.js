@@ -9,6 +9,8 @@ const { uploadDisputeEvidence } = require('./middleware/disputeEvidenceUpload');
 const { rememberAmountSource } = require('./domain/postgresMoney');
 const createAuthService = require('./services/createAuthService');
 const createAuthenticate = require('./middleware/createAuthenticate');
+const createMilestoneGenerator = require('./services/generateMilestones');
+const milestoneRateLimit = require('./middleware/milestoneRateLimit');
 const requireRole = require('./middleware/requireRole');
 const rejectIdentitySpoof = require('./middleware/rejectIdentitySpoof');
 const { BaseError, UnauthorizedError, ValidationError } = require('./utils/errors');
@@ -31,7 +33,7 @@ function respond(action, status = 200) {
   };
 }
 
-function createPostgresApp(db) {
+function createPostgresApp(db, { milestoneProvider } = {}) {
   const app = express();
   const api = express.Router();
   const users = postgresUsers(db);
@@ -45,6 +47,7 @@ function createPostgresApp(db) {
   const clientOnly = requireRole('CLIENT');
   const participants = requireRole('CLIENT', 'PROVIDER');
   const adminOnly = requireRole('ADMIN');
+  const generateMilestones = createMilestoneGenerator({ provider: milestoneProvider });
 
   app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', 'http://localhost:5173');
@@ -53,6 +56,11 @@ function createPostgresApp(db) {
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     next();
   });
+  app.post('/api/ai/generate-milestones',
+    authenticate, clientOnly, milestoneRateLimit(),
+    express.json({ limit: '16kb', reviver: rememberAmountSource }), rejectIdentitySpoof,
+    respond(req => generateMilestones(req.body)),
+  );
   app.use(express.json({ limit: '50mb', reviver: rememberAmountSource }));
   app.get('/health', (req, res) => res.json({
     status: 'ok', timestamp: Date.now(), service: 'SecureEscrow-Backend', persistence: 'postgresql',

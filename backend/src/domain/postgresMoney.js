@@ -17,7 +17,10 @@ function rememberAmountSource(key, value, context) {
 function amount(input, key = 'amount', scale = 8) {
   const value = input?.[key];
   if (typeof value !== 'number' || !Number.isFinite(value)) throw new ValidationError('Enter a positive amount');
-  const decimal = new Decimal(numericSources.get(input)?.get(key) ?? value);
+  return validateDecimalAmount(new Decimal(numericSources.get(input)?.get(key) ?? value), scale);
+}
+
+function validateDecimalAmount(decimal, scale = 8) {
   if (!decimal.isPositive() || decimal.isZero() || decimal.decimalPlaces() > scale || decimal.gt(API_LIMIT)) {
     throw new ValidationError(`Enter an amount from above zero through 50,000,000 with at most ${scale} fractional digits`);
   }
@@ -30,4 +33,4 @@ function numericApi(value) {
   return numeric;
 }
 
-module.exports = { Decimal, API_LIMIT, amount, numericApi, rememberAmountSource };
+module.exports = { Decimal, API_LIMIT, amount, validateDecimalAmount, numericApi, rememberAmountSource };
