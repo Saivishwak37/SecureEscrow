@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import "@testing-library/jest-dom/vitest"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import App, { AdminDisputeManagement, CreateEscrowModal, ConditionManagement, DisputeActivityPanel, DisputeEvidencePanel, EscrowDetailsPage } from "./App"
-import { AuthProvider } from "./auth/AuthContext"
+import { AuthProvider, useAuth } from "./auth/AuthContext"
 import * as api from "./services/api"
 import type { BackendCondition, BackendDispute, BackendDisputeEvidence, BackendUser } from "./services/api"
 
@@ -11,6 +11,24 @@ const provider: BackendUser = { id: "payee-1", name: "Provider", type: "PROVIDER
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe("dashboard initial data loading", () => {
+  it("clears the in-memory authorization token on logout", async () => {
+    const user = { id: "logout-user", username: "provider", email: "provider@example.test", role: "PROVIDER" as const }
+    const setToken = vi.spyOn(api, "setAccessToken")
+    vi.spyOn(api, "login").mockResolvedValue({ user, accessToken: "fixture-token" })
+    vi.spyOn(api, "me").mockResolvedValue(user)
+    function Session() {
+      const auth = useAuth()
+      return auth.user
+        ? <button onClick={auth.logout}>End Session</button>
+        : <button onClick={() => void auth.login(user.email, "fixture")}>Begin Session</button>
+    }
+    render(<AuthProvider><Session /></AuthProvider>)
+    fireEvent.click(screen.getByRole("button", { name: "Begin Session" }))
+    fireEvent.click(await screen.findByRole("button", { name: "End Session" }))
+    expect(setToken.mock.calls).toEqual([["fixture-token"], [null]])
+    expect(screen.getByRole("button", { name: "Begin Session" })).toBeInTheDocument()
+  })
+
   it("loads once after login instead of repeating requests on loading-state renders", async () => {
     const user = { id: "client-1", username: "client1", email: "client@example.com", role: "CLIENT" as const }
     vi.spyOn(api, "login").mockResolvedValue({ accessToken: "signed-token", user })
@@ -248,7 +266,9 @@ describe("admin dispute management", () => {
     const transactions = [{ id: "fund-admin", type: "FUND" as const, escrowId: escrow.id, escrowTitle: escrow.title, milestoneId: "", amount: 100, from: "Client", to: "Escrow", fromAccountId: "client-account", toAccountId: "escrow-account", status: "COMPLETED" as const, timestamp: "today" }]
     const history = vi.spyOn(api, "getDisputeStatusHistory").mockResolvedValue([])
     const resolutions = vi.spyOn(api, "getDisputeResolutions").mockResolvedValue([])
-    const execute = vi.spyOn(api, "resolveDispute").mockResolvedValue({
+    const execute = vi.spyOn(api, "resolveDispute")
+      .mockRejectedValueOnce(new api.ApiError("Network interrupted", "NETWORK_ERROR", 0))
+      .mockResolvedValue({
       id: "resolution-1", disputeId: dispute.id, resolvedBy: "admin-1", transactionId: "tx-1", transactionIds: ["tx-1"],
       decision: "RELEASE_TO_PROVIDER", reasoning: "Evidence supports this outcome.", executionStatus: "COMPLETED",
       remainingEscrowBalance: 0, createdAt: 2, allocations: [], status: "RESOLVED", transactions: [],
@@ -268,7 +288,10 @@ describe("admin dispute management", () => {
     expect(execute).not.toHaveBeenCalled()
     confirm.mockReturnValue(true)
     fireEvent.click(resolveButton)
+    await screen.findByText("Network interrupted")
+    fireEvent.click(resolveButton)
     await screen.findByText("Resolution executed successfully.")
+    expect(execute.mock.calls[0][1].idempotencyKey).toEqual(execute.mock.calls[1][1].idempotencyKey)
     expect(execute).toHaveBeenCalledWith("dispute-admin", expect.objectContaining({ decision: "RELEASE_TO_PROVIDER", reasoning: "Evidence supports this outcome." }))
     history.mockRestore(); resolutions.mockRestore(); execute.mockRestore()
   })

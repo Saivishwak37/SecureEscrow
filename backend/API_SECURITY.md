@@ -10,7 +10,7 @@ All paths below are mounted below `/api`. Except for the public authentication r
 | `POST /auth/register` | Public; creates CLIENT or PROVIDER only | New account |
 | `POST /auth/login` | Public | Credentials only |
 | `GET /auth/me` | Any active authenticated role | Current token subject only |
-| `POST /users` | ADMIN | Administrative legacy user provisioning |
+| `POST /users` | ADMIN | Credential-less CLIENT or PROVIDER profiles only |
 | `GET /users` | CLIENT, PROVIDER, ADMIN | CLIENT gets active provider profiles; PROVIDER gets self and clients linked through its escrows; ADMIN gets all |
 | `GET /users/:id` | Any authenticated role | Own profile, ADMIN, or participant-linked profile according to controller checks |
 | `POST /accounts` | CLIENT, PROVIDER | Account is created for token subject; caller-supplied owner is ignored |
@@ -53,6 +53,7 @@ All paths below are mounted below `/api`. Except for the public authentication r
 | `GET /transactions/:id/ledger` | Transaction participant or ADMIN | Related escrow or personal account |
 | `GET /transactions/:id` | Transaction participant or ADMIN | Related escrow or personal account |
 | `POST /disputes/:disputeId/resolve` | ADMIN | Admin resolution workflow |
+| `GET /disputes/:disputeId` | Dispute participant or ADMIN | Own dispute; ADMIN read permitted |
 | `PATCH /disputes/:disputeId/status` | ADMIN | Admin status transitions only |
 | `GET /disputes/:disputeId/history` | Dispute participant or ADMIN | Own dispute; ADMIN read permitted |
 | `GET /disputes/:disputeId/resolutions` | Dispute participant or ADMIN | Own dispute; ADMIN read permitted |
@@ -66,4 +67,4 @@ Unknown routes are answered with 404. The root health check is outside `/api` an
 
 ## Limits
 
-Escrow/account/dispute state is still held in process memory. Current authentication-backed User records coexist with older seeded/demo identities; those legacy users are not automatically migrated. Request bearer tokens are currently established by the preceding authentication batch. This policy adds authentication and resource-level authorization, not frontend session handling or token revocation. ADMIN read access is explicit on selected audit and resource inspection endpoints; write access is limited to the listed administrative routes.
+The default backend reads identities and resources from PostgreSQL. ADMIN access is explicit on the listed routes. Upload authorization runs before multipart parsing and is repeated under the escrow lock before saving metadata. Private evidence is served through authenticated routes with type and size requirements. Frontend logout clears the in-memory bearer token. [Database and evidence details](docs/DATABASE_DESIGN.md)

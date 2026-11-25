@@ -101,3 +101,23 @@ test('rejects a dispute allocation whose amount disagrees with its transfer', ()
     const good = await tx.disputeResolutionAllocation.create({ data: allocation });
     await tx.disputeResolutionAllocation.update({ where: { id: good.id }, data: { amount: '1' } });
   }), error => error.code === 'P2003' && error.message.includes('allocation_transfer_match_fkey')));
+
+test('rejects a transfer that attempts to use a resolution outside its disputed milestone', () =>
+  assert.rejects(exercise(async (tx, { client, escrow, holding, recipient }) => {
+    const milestone = await tx.milestone.create({ data: {
+      escrowId: escrow.id, title: 'Scope check', amount: '10.25', order: 1,
+    } });
+    const dispute = await tx.dispute.create({ data: {
+      escrowId: escrow.id, milestoneId: milestone.id, raisedBy: client.id, title: 'Constraint check',
+      category: 'OTHER', reason: 'Constraint check', requestedResolution: 'RELEASE',
+    } });
+    const admin = await tx.user.create({ data: { role: 'ADMIN' } });
+    const resolution = await tx.disputeResolution.create({ data: {
+      disputeId: dispute.id, resolvedBy: admin.id, decision: 'RELEASE_TO_PROVIDER',
+      reasoning: 'Constraint check', idempotencyKey: randomUUID(), requestShape: '{}',
+    } });
+    await tx.$executeRaw`
+      INSERT INTO "transaction" (id, escrow_id, resolution_id, from_account_id, to_account_id, type, amount, currency, updated_at)
+      VALUES (${randomUUID()}, ${escrow.id}, ${resolution.id}, ${holding.id}, ${recipient.id}, 'RELEASE', 10.25, 'INR', now())
+    `;
+  }), error => error.meta?.code === '23514' && error.message.includes('Resolution transfer must match its dispute scope')));

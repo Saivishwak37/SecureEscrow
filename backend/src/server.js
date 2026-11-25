@@ -1,40 +1,26 @@
-// Server Entry Point for SecureEscrow
-require('dotenv').config();
-const app = require('./app');
-const { getStore } = require('./data/store');
+const { getPrisma } = require('./data/prisma');
+const createPostgresApp = require('./postgresApp');
+const { getJwtConfig } = require('./services/jwtService');
 
-const PORT = process.env.PORT || 3000;
-const NODE_ENV = process.env.NODE_ENV || 'development';
-
-const server = app.listen(PORT, () => {
-  console.log(`=========================================`);
-  console.log(`SecureLance Server Started`);
-  console.log(`Port: ${PORT}`);
-  console.log(`Environment: ${NODE_ENV}`);
-  console.log(`=========================================`);
-
-  // Log initial data state
-  const store = getStore();
-  console.log(`\nInitial Data:`);
-  console.log(`- Users: ${store.users.length}`);
-  console.log(`- Accounts: ${store.accounts.length}`);
-  const clientAccount = store.getAccountByUserId('user-1');
-  const providerAccount = store.getAccountByUserId('user-2');
-  const escrowAccount = store.getEscrowAccount();
-  console.log(`  - Client (user-1): ₹${clientAccount.balance}`);
-  console.log(`  - Provider (user-2): ₹${providerAccount.balance}`);
-  console.log(`  - Escrow: ₹${escrowAccount.balance}`);
-  console.log(`\nServer ready to accept requests.`);
-});
-
-// Graceful shutdown
-const shutdown = () => {
-  console.log('\nShutting down gracefully...');
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
+async function start() {
+  getJwtConfig();
+  const db = getPrisma();
+  await db.$connect();
+  const port = Number(process.env.POSTGRES_PORT ?? process.env.PORT ?? 3000);
+  const server = createPostgresApp(db).listen(port, '127.0.0.1', () => {
+    console.log(`SecureEscrow PostgreSQL listening on 127.0.0.1:${server.address().port}`);
   });
-};
+  server.on('error', async error => {
+    console.error('PostgreSQL listener failed:', error.code || error.name);
+    await db.$disconnect();
+    process.exitCode = 1;
+  });
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => server.close(() => db.$disconnect()));
+  }
+}
 
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+start().catch(error => {
+  console.error('PostgreSQL startup failed:', error.errorCode || error.code || error.name);
+  process.exitCode = 1;
+});

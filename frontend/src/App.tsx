@@ -622,6 +622,7 @@ export function AdminDisputeManagement({ escrows, transactions, actorId, onRefre
   const [audit, setAudit] = useState<api.BackendDisputeStatusHistory[]>([])
   const [resolutions, setResolutions] = useState<api.BackendDisputeResolution[]>([])
   const [auditRefresh, setAuditRefresh] = useState(0)
+  const pendingResolutions = useRef(new Map<string, string>())
   const selected = disputes.find(item => item.dispute.id === selectedId) ?? disputes.find(item => item.dispute.status !== "RESOLVED")
   useEffect(() => {
     if (!selected) { setAudit([]); setResolutions([]); return }
@@ -652,18 +653,25 @@ export function AdminDisputeManagement({ escrows, transactions, actorId, onRefre
         : decision === "RELEASE_TO_PROVIDER" ? `Provider receives ${fmt(available)}` : `Client receives ${fmt(available)}`
     const summary = `${selected.dispute.title}\nDecision: ${decision.replaceAll("_", " ")}\n${parts}\nReason: ${reasoning.trim()}`
     if (!window.confirm(`Confirm dispute resolution?\n\n${summary}`)) return
+    const intent = JSON.stringify([selected.dispute.id, decision, reasoning.trim(), provider, client])
+    const key = pendingResolutions.current.get(intent) ?? crypto.randomUUID()
+    pendingResolutions.current.set(intent, key)
     setBusy(true); setError(""); setNotice("")
     try {
-      await api.resolveDispute(selected.dispute.id, { decision, reasoning: reasoning.trim(), ...(provider !== undefined ? { providerAmount: provider } : {}), ...(client !== undefined ? { clientAmount: client } : {}), idempotencyKey: `${Date.now()}-${Math.random().toString(36).slice(2)}` })
+      await api.resolveDispute(selected.dispute.id, { decision, reasoning: reasoning.trim(), ...(provider !== undefined ? { providerAmount: provider } : {}), ...(client !== undefined ? { clientAmount: client } : {}), idempotencyKey: key })
+      pendingResolutions.current.delete(intent)
       setNotice("Resolution executed successfully."); setReasoning(""); setProviderAmount(""); setClientAmount(""); await onRefresh(); setAuditRefresh(value => value + 1)
-    } catch (err) { setError(extractApiErrorMessage(err)) }
+    } catch (err) {
+      if (err instanceof api.ApiError && err.status > 0 && err.status < 500) pendingResolutions.current.delete(intent)
+      setError(extractApiErrorMessage(err))
+    }
     finally { setBusy(false) }
   }
   const moveStatus = async () => {
     if (!selected || !nextTransition) return
-    setBusy(true); setError(""); setNotice("")
     const reason = nextTransition === "EVIDENCE_SUBMISSION" ? evidenceRequest.trim() : "Admin began dispute review"
     if (!reason) { setError("Describe the specific evidence needed from the participants."); return }
+    setBusy(true); setError(""); setNotice("")
     try { await api.changeDisputeStatus(selected.dispute.id, nextTransition, reason); setNotice(nextTransition === "EVIDENCE_SUBMISSION" ? "Evidence request sent to both participants." : "Dispute moved to Admin review."); setEvidenceRequest(""); await onRefresh(); setAuditRefresh(value => value + 1) }
     catch (err) { setError(extractApiErrorMessage(err)) }
     finally { setBusy(false) }
@@ -1456,9 +1464,10 @@ function LedgerPage({ entries, summary }: {
 
 // ─── Accounts Page ────────────────────────────────────────────────────────────
 
-function AccountsPage({ currentAccountId, clientAccount, providerAccount, escrowAccount, clientName, providerName, onTransfer }: {
+function AccountsPage({ currentAccountId, clientAccount, providerAccount, escrowAccount, escrowHeld, clientName, providerName, onTransfer }: {
   currentAccountId: string
   clientAccount: BackendAccount | null; providerAccount: BackendAccount | null; escrowAccount: BackendAccount | null
+  escrowHeld?: number
   clientName: string; providerName: string
   onTransfer: (operation: "DEPOSIT" | "WITHDRAWAL", amount: number) => Promise<boolean>
 }) {
@@ -1481,7 +1490,7 @@ function AccountsPage({ currentAccountId, clientAccount, providerAccount, escrow
     currentIsClient
       ? { type: "CLIENT ACCOUNT", name: clientName, id: shortId(currentAccount?.id ?? ""), label: "Available Balance", balance: currentAccount?.balance ?? 0, color: "border-blue-200 bg-blue-50", dot: "bg-blue-500" }
       : { type: "PROVIDER ACCOUNT", name: providerName, id: shortId(currentAccount?.id ?? ""), label: "Available Balance", balance: currentAccount?.balance ?? 0, color: "border-emerald-200 bg-emerald-50", dot: "bg-emerald-500" },
-    { type: "ESCROW ACCOUNT", name: "Held In Escrow", id: shortId(escrowAccount?.id ?? ""), label: "Total Held", balance: escrowAccount?.balance ?? 0, color: "border-violet-200 bg-violet-50", dot: "bg-violet-500" },
+    { type: "ESCROW ACCOUNT", name: "Held In Escrow", id: shortId(escrowAccount?.id ?? ""), label: "Total Held", balance: escrowHeld ?? escrowAccount?.balance ?? 0, color: "border-violet-200 bg-violet-50", dot: "bg-violet-500" },
   ]
   return (
     <div className="flex-1 overflow-y-auto">
@@ -1817,6 +1826,7 @@ export default function App() {
   const [clientAccount, setClientAccount] = useState<BackendAccount | null>(null)
   const [providerAccount, setProviderAccount] = useState<BackendAccount | null>(null)
   const [escrowAccount, setEscrowAccount] = useState<BackendAccount | null>(null)
+  const [escrowHeld, setEscrowHeld] = useState<number>()
   const [rawTransactions, setRawTransactions] = useState<BackendTransaction[]>([])
   const [rawLedgerEntries, setRawLedgerEntries] = useState<BackendLedgerEntry[]>([])
   const [ledgerSummary, setLedgerSummary] = useState<{ totalDebits: number; totalCredits: number; balanced: boolean; transactionsValidated: number } | null>(null)
@@ -1890,16 +1900,17 @@ export default function App() {
     setDataLoading(true)
     setDataError(null)
     try {
-      const escrowsWithMilestones = await api.getAllEscrowsWithReleaseItems()
+      const validation = currentRole === "ADMIN" ? await api.validateLedger() : null
+      const escrowsWithMilestones = await api.getAllEscrowsWithReleaseItems(currentRole === "ADMIN")
       const ownAccount = currentRole === "ADMIN" ? null : await api.getAccountByUserId(authenticatedUser.id)
-      const [escrowAcc, validation] = await Promise.all([
-        currentRole === "ADMIN" ? api.getAccountById(api.ESCROW_ACCOUNT_ID) : Promise.resolve(null),
-        currentRole === "ADMIN" ? api.validateLedger() : Promise.resolve(null),
-      ])
+      const escrowAcc = currentRole === "ADMIN" && validation?.escrowHeld === undefined
+        ? await api.getAccountById(api.ESCROW_ACCOUNT_ID)
+        : null
       setRawEscrows(escrowsWithMilestones)
       setClientAccount(currentRole === "CLIENT" ? ownAccount : null)
       setProviderAccount(currentRole === "PROVIDER" ? ownAccount : null)
       setEscrowAccount(escrowAcc)
+      setEscrowHeld(validation?.escrowHeld)
       setLedgerSummary(validation ? { totalDebits: validation.results.reduce((s, r) => s + r.totalDebits, 0), totalCredits: validation.results.reduce((s, r) => s + r.totalCredits, 0), balanced: validation.allBalanced, transactionsValidated: validation.totalTransactions } : null)
 
       const [escrowTransactions, accountTransactions] = await Promise.all([
@@ -1932,7 +1943,7 @@ export default function App() {
       id: e.id, title: e.title, description: e.description, domain: meta.domain,
       providerName: userName(e.freelancerId), providerId: e.freelancerId, clientId: e.clientId,
       totalAmount: e.totalAmount, releaseModel: meta.releaseModel,
-      state: e.releaseModel === "CONDITION_BASED" || ["DISPUTED", "RELEASED", "CANCELLED", "RESOLVED"].includes(e.status) ? e.status as EscrowState : deriveEscrowState(milestones ?? []), ...(milestones ? { milestones } : {}), conditions: e.releaseEligibility?.conditions ?? e.conditions ?? [], disputes: e.disputes ?? [],
+      state: e.releaseModel === "CONDITION_BASED" || !milestones || ["DISPUTED", "RELEASED", "CANCELLED", "RESOLVED"].includes(e.status) ? e.status as EscrowState : deriveEscrowState(milestones), ...(milestones ? { milestones } : {}), conditions: e.releaseEligibility?.conditions ?? e.conditions ?? [], disputes: e.disputes ?? [],
       releaseEligible: e.releaseEligibility?.eligible ?? false, releaseBlockedReason: e.releaseEligibility?.reason ?? "Escrow is not fully funded", createdAt: fmtTime(e.createdAt),
       disputed: Boolean(e.disputed || e.status === "DISPUTED"),
     }
@@ -2100,18 +2111,27 @@ export default function App() {
     } finally { setLoadingAction(null) }
   }, [clientUser, refreshAll, addToast])
 
+  const pendingWalletTransfers = useRef(new Map<string, string>())
   const handleAccountTransfer = useCallback(async (operation: "DEPOSIT" | "WITHDRAWAL", amount: number) => {
     const account = currentRole === "CLIENT" ? clientAccount : providerAccount
     const actorId = currentRole === "CLIENT" ? clientUser?.id : providerUser?.id
     if (!account || !actorId) return false
+    const intent = JSON.stringify([actorId, account.id, operation, amount])
+    let key = pendingWalletTransfers.current.get(intent)
+    if (!key) {
+      key = crypto.randomUUID()
+      pendingWalletTransfers.current.set(intent, key)
+    }
     try {
       const result = operation === "DEPOSIT"
-        ? await api.depositToAccount(account.id, amount)
-        : await api.withdrawFromAccount(account.id, amount)
+        ? await api.depositToAccount(account.id, amount, key)
+        : await api.withdrawFromAccount(account.id, amount, key)
+      pendingWalletTransfers.current.delete(intent)
       await refreshAll()
       addToast({ type: "success", title: operation === "DEPOSIT" ? "Funds added" : "Withdrawal complete", message: `${fmt(result.transaction.amount)} ${operation === "DEPOSIT" ? "added to" : "withdrawn from"} your account.` })
       return true
     } catch (err) {
+      if (err instanceof api.ApiError && err.status > 0 && err.status < 500) pendingWalletTransfers.current.delete(intent)
       addToast({ type: "error", title: operation === "DEPOSIT" ? "Deposit failed" : "Withdrawal failed", message: extractApiErrorMessage(err) })
       return false
     }
@@ -2217,7 +2237,7 @@ export default function App() {
           {page === "accounts" && (
             <AccountsPage
               currentAccountId={currentRole === "CLIENT" ? (clientAccount?.id ?? "") : (providerAccount?.id ?? "")}
-              clientAccount={clientAccount} providerAccount={providerAccount} escrowAccount={escrowAccount}
+              clientAccount={clientAccount} providerAccount={providerAccount} escrowAccount={escrowAccount} escrowHeld={escrowHeld}
               clientName={clientUser?.name ?? "Test Client"} providerName={providerUser?.name ?? "Test Provider"}
               onTransfer={handleAccountTransfer}
             />

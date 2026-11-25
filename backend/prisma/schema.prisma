@@ -336,6 +336,7 @@ model LedgerEntry {
   @@map("ledger_entry")
 }
 
+/// SQL triggers keep dispute scope immutable and bind resolution transfers to it.
 model Dispute {
   id                  String        @id @default(uuid())
   escrowId            String        @map("escrow_id")

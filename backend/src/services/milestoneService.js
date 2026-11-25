@@ -5,6 +5,7 @@ const { transition, STATES, ACTIONS } = require('../domain/escrowStateMachine');
 const { ValidationError, NotFoundError, InvalidStateTransitionError } = require('../utils/errors');
 const accountRepository = require('../repositories/accountRepository');
 const transactionService = require('./transactionService');
+const normalizeAttachments = require('../domain/milestoneSubmission');
 const { assertEscrowNotDisputed } = require('../domain/escrowGuards');
 const { assertEscrowParticipantRole } = require('../domain/participantAuthorization');
 
@@ -89,16 +90,7 @@ function updateMilestoneStatus(milestoneId, action, actorId, submission = {}) {
     const newStatus = transition(milestone.status, action);
     const updates = { status: newStatus };
     if (action === ACTIONS.SUBMIT) {
-      const attachments = Array.isArray(submission.attachments) ? submission.attachments : [];
-      if (!attachments.length) throw new ValidationError('Attach at least one file with your submission');
-      if (attachments.length > 5) throw new ValidationError('You can attach up to 5 files per submission');
-      const normalized = attachments.map(file => {
-        if (!file || typeof file.name !== 'string' || typeof file.data !== 'string' || typeof file.type !== 'string') throw new ValidationError('Each attachment must include a name, type, and file data');
-        if (!file.data.startsWith('data:')) throw new ValidationError('Attachment data is invalid');
-        if (file.data.length > 7_000_000) throw new ValidationError('Each file must be 5 MB or smaller');
-        return { name: file.name.slice(0, 255), type: file.type || 'application/octet-stream', data: file.data };
-      });
-      if (normalized.reduce((total, file) => total + file.data.length, 0) > 9_000_000) throw new ValidationError('The combined submission files must be smaller than 7 MB');
+      const normalized = normalizeAttachments(submission);
       updates.submissions = [...(milestone.submissions || []), { attachments: normalized, submittedAt: Date.now(), submittedBy: actorId }];
       updates.reviewFeedback = null;
     }

@@ -86,6 +86,7 @@ export interface LedgerValidationResult {
   totalTransactions: number
   allBalanced: boolean
   results: { transactionId: string; balanced: boolean; totalDebits: number; totalCredits: number }[]
+  escrowHeld?: number
 }
 export interface FundOrReleaseResult { transaction: BackendTransaction; milestone: BackendMilestone }
 
@@ -153,8 +154,12 @@ export const getAccountByUserId = (userId: string) => get<BackendAccount>(`/api/
 export const getAccountById = (accountId: string) => get<BackendAccount>(`/api/accounts/${accountId}`)
 export const getAccountLedger = (accountId: string) => get<BackendLedgerEntry[]>(`/api/accounts/${accountId}/ledger`)
 export const getAccountTransactions = (accountId: string) => get<BackendTransaction[]>(`/api/accounts/${accountId}/transactions`)
-export const depositToAccount = (accountId: string, amount: number) => post<{ transaction: BackendTransaction; account: BackendAccount }>(`/api/accounts/${accountId}/deposit`, { amount })
-export const withdrawFromAccount = (accountId: string, amount: number) => post<{ transaction: BackendTransaction; account: BackendAccount }>(`/api/accounts/${accountId}/withdraw`, { amount })
+const walletTransfer = (accountId: string, operation: "deposit" | "withdraw", amount: number, key: string) =>
+  request<{ transaction: BackendTransaction; account: BackendAccount }>(`/api/accounts/${accountId}/${operation}`, {
+    method: "POST", body: JSON.stringify({ amount }), headers: { "Idempotency-Key": key },
+  })
+export const depositToAccount = (accountId: string, amount: number, key: string = crypto.randomUUID()) => walletTransfer(accountId, "deposit", amount, key)
+export const withdrawFromAccount = (accountId: string, amount: number, key: string = crypto.randomUUID()) => walletTransfer(accountId, "withdraw", amount, key)
 
 // ─── Escrows ────────────────────────────────────────────────────────────────
 export const getEscrows = () => get<BackendEscrow[]>("/api/escrows")
@@ -256,13 +261,13 @@ export const validateLedger = () => get<LedgerValidationResult>("/api/transactio
 // ─── Aggregate helpers ──────────────────────────────────────────────────────
 export interface EscrowWithReleaseItems extends BackendEscrow { milestones?: BackendMilestone[]; conditions?: BackendCondition[]; disputes?: BackendDispute[]; releaseEligibility?: { eligible: boolean; reason: string | null; conditions: BackendCondition[] } }
 
-export async function getAllEscrowsWithReleaseItems(): Promise<EscrowWithReleaseItems[]> {
+export async function getAllEscrowsWithReleaseItems(adminView = false): Promise<EscrowWithReleaseItems[]> {
   const escrows = await getEscrows()
   return Promise.all(escrows.map(async escrow => ({
     ...escrow,
     disputes: await getEscrowDisputes(escrow.id),
-    ...(escrow.releaseModel === "MILESTONE_BASED" ? { milestones: await getMilestonesByEscrow(escrow.id) } : {}),
-    ...(escrow.releaseModel === "CONDITION_BASED" ? { conditions: await getConditions(escrow.id), releaseEligibility: await getReleaseEligibility(escrow.id) } : {}),
+    ...(!adminView && escrow.releaseModel === "MILESTONE_BASED" ? { milestones: await getMilestonesByEscrow(escrow.id) } : {}),
+    ...(!adminView && escrow.releaseModel === "CONDITION_BASED" ? { conditions: await getConditions(escrow.id), releaseEligibility: await getReleaseEligibility(escrow.id) } : {}),
   })))
 }
 

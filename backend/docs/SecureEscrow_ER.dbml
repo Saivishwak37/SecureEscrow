@@ -1,6 +1,6 @@
 Project SecureEscrow {
   database_type: 'PostgreSQL'
-  Note: 'See DATABASE_DESIGN.md for partial indexes, checks and ledger triggers.'
+  Note: 'See DATABASE_DESIGN.md for partial indexes, posting checks, and triggers binding resolution transfers to immutable dispute scope.'
 }
 
 Enum Role {

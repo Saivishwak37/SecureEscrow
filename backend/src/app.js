@@ -1,4 +1,4 @@
-// Express Application for SecureEscrow
+// Isolated legacy Express app used by the regression suite.
 const express = require('express');
 const { getStore } = require('./data/store');
 const { BaseError } = require('./utils/errors');
@@ -15,7 +15,7 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS');
   res.header(
     'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, role, provider-id'
+    'Content-Type, Authorization, role, provider-id, Idempotency-Key'
   );
 
   if (req.method === 'OPTIONS') {

@@ -4,37 +4,8 @@ const transactionRepository = require('../repositories/transactionRepository');
 const { ValidationError, UnauthorizedError } = require('../utils/errors');
 const { assertEscrowParticipantRole } = require('../domain/participantAuthorization');
 
-const TYPES = new Set([
-  'CLIENT_APPROVAL', 'WORK_SUBMITTED', 'DEADLINE_REACHED', 'PARTICIPANT_APPROVAL',
-  'EVIDENCE_SUBMITTED', 'DELIVERY_CONFIRMED', 'EXTERNAL_VERIFICATION', 'CUSTOM',
-]);
-const LEGACY_ALL = 'ALL_CONDITIONS_MET';
-
-function validateCondition(input, { allowLegacy = false, requireText = false } = {}) {
-  if (!input || typeof input !== 'object') throw new ValidationError('Condition details are required');
-  if (allowLegacy && input.type === LEGACY_ALL) return null;
-  if (!TYPES.has(input.type)) throw new ValidationError(`Unsupported condition type: ${input.type}`);
-  const title = String(input.title || (requireText ? '' : input.type.replaceAll('_', ' '))).trim();
-  const description = String(input.description || (requireText ? '' : `Satisfy the ${title.toLowerCase()} requirement.`)).trim();
-  if (!title || !description) throw new ValidationError('Condition title and description are required');
-  const config = input.config && typeof input.config === 'object' && !Array.isArray(input.config) ? { ...input.config } : {};
-  // These condition types are provider submissions; store their intended role
-  // explicitly as well as enforcing it in satisfy().
-  if (['WORK_SUBMITTED', 'EVIDENCE_SUBMITTED'].includes(input.type)) config.actorRole = 'PAYEE';
-  const required = input.required === undefined ? true : input.required;
-  if (typeof required !== 'boolean') throw new ValidationError('Condition required must be true or false');
-  if (input.type === 'DEADLINE_REACHED') {
-    const deadline = config.deadline || input.deadline;
-    if (!deadline || !Number.isFinite(Date.parse(deadline))) throw new ValidationError('DEADLINE_REACHED requires a valid deadline');
-    config.deadline = new Date(deadline).toISOString();
-  }
-  if (input.type === 'EXTERNAL_VERIFICATION' && !String(config.verificationSource || '').trim()) throw new ValidationError('EXTERNAL_VERIFICATION requires a verificationSource');
-  if (input.type === 'EVIDENCE_SUBMITTED' && !String(config.evidenceRequirement || '').trim()) throw new ValidationError('EVIDENCE_SUBMITTED requires an evidenceRequirement');
-  if (input.type === 'EXTERNAL_VERIFICATION' && !String(config.verifierRole || '').trim()) throw new ValidationError('EXTERNAL_VERIFICATION requires a verifierRole');
-  if (input.type === 'PARTICIPANT_APPROVAL' && !String(config.actorRole || '').trim()) throw new ValidationError('PARTICIPANT_APPROVAL requires an actorRole');
-  if (input.type === 'CUSTOM' && !String(config.actorRole || '').trim()) throw new ValidationError('CUSTOM conditions require an actorRole');
-  return { title, description, type: input.type, config, required };
-}
+const { conditionActorRole, satisfactionChanges, reviewChanges } = require('../domain/conditionWorkflow');
+const { TYPES, validateCondition } = require('../domain/validateCondition');
 
 function canEdit(escrow) {
   if (escrow.releaseModel !== 'CONDITION_BASED') throw new ValidationError('Conditions are only available for condition-based agreements');
@@ -104,35 +75,14 @@ function satisfy(conditionId, actorId, evidence) {
   if (escrow.disputed || ['DISPUTED', 'CANCELLED', 'EXPIRED', 'RELEASED'].includes(escrow.status)) throw new ValidationError('Blocked or completed escrow cannot satisfy conditions');
   if (!transactionRepository.getTransactionsByEscrowId(escrow.id).some(t => t.type === 'FUND' && t.status === 'COMPLETED')) throw new ValidationError('Fund the escrow before satisfying release conditions');
   if (condition.status === 'SATISFIED') return condition;
-  if (condition.type === 'DEADLINE_REACHED') throw new UnauthorizedError('Deadline conditions are evaluated by the system');
-  const defaultRole = {
-    CLIENT_APPROVAL: 'PAYER', PARTICIPANT_APPROVAL: 'PAYER', DELIVERY_CONFIRMED: 'PAYER',
-    WORK_SUBMITTED: 'PAYEE', EVIDENCE_SUBMITTED: 'PAYEE',
-    EXTERNAL_VERIFICATION: condition.config.verifierRole,
-  }[condition.type];
-  // Work and evidence submissions belong to the provider even if stale/custom
-  // condition configuration says otherwise. The client reviews work separately.
-  const actorRole = ['WORK_SUBMITTED', 'EVIDENCE_SUBMITTED'].includes(condition.type)
-    ? 'PAYEE'
-    : condition.config.actorRole || defaultRole;
+  const actorRole = conditionActorRole(condition);
   const effectiveRole = ({ PAYER: 'CLIENT', PAYEE: 'PROVIDER', CLIENT: 'CLIENT', PROVIDER: 'PROVIDER' })[actorRole];
   if (effectiveRole) assertEscrowParticipantRole(escrow, actorId, [effectiveRole]);
   const actorIsParticipant = escrow.participants?.some(p => p.userId === actorId && p.role === actorRole)
     || (actorRole === 'PAYER' && actorId === escrow.payerId)
     || (actorRole === 'PAYEE' && actorId === escrow.payeeId);
   if (!actorIsParticipant) throw new UnauthorizedError(`Only an agreement participant with role ${actorRole || 'authorized actor'} may satisfy condition "${condition.title}" (${condition.type})`);
-  if ((['WORK_SUBMITTED', 'EVIDENCE_SUBMITTED', 'EXTERNAL_VERIFICATION'].includes(condition.type) || condition.config.evidenceRequired) && !String(evidence || '').trim()) throw new ValidationError('Evidence or verification details are required to satisfy this condition');
-  if (['WORK_SUBMITTED', 'EVIDENCE_SUBMITTED'].includes(condition.type)) {
-    if (!['PENDING', 'REJECTED'].includes(condition.status)) throw new ValidationError('Submission is already awaiting creator review');
-    return conditionRepository.updateCondition(conditionId, {
-      status: 'SUBMITTED', submittedAt: Date.now(), submittedBy: actorId,
-      verificationDetails: { evidence: String(evidence).trim() },
-    });
-  }
-  return conditionRepository.updateCondition(conditionId, {
-    status: 'SATISFIED', satisfiedAt: Date.now(), satisfiedBy: actorId,
-    verificationDetails: evidence ? { evidence: String(evidence).trim() } : { source: 'participant_action' },
-  });
+  return conditionRepository.updateCondition(conditionId, satisfactionChanges(condition, actorId, evidence));
 }
 
 function reviewWork(conditionId, actorId, decision, feedback = '') {
@@ -142,16 +92,7 @@ function reviewWork(conditionId, actorId, decision, feedback = '') {
   if (!actorId || actorId !== escrow.payerId) throw new UnauthorizedError('Only the agreement creator may review submitted work or evidence');
   assertEscrowParticipantRole(escrow, actorId, ['CLIENT']);
   if (escrow.disputed || ['DISPUTED', 'CANCELLED', 'EXPIRED', 'RELEASED'].includes(escrow.status)) throw new ValidationError('Blocked or completed escrow cannot review submissions');
-  if (condition.status !== 'SUBMITTED') throw new ValidationError('Work or evidence must be submitted before the creator can review it');
-  if (!['APPROVE', 'REJECT'].includes(decision)) throw new ValidationError('Review decision must be APPROVE or REJECT');
-  if (decision === 'REJECT' && !feedback.trim()) throw new ValidationError('Provide feedback explaining why the submission was rejected');
-  const details = { ...(condition.verificationDetails || {}), reviewedBy: actorId, reviewedAt: Date.now() };
-  if (feedback.trim()) details.reviewFeedback = feedback.trim();
-  return conditionRepository.updateCondition(conditionId, {
-    status: decision === 'APPROVE' ? 'SATISFIED' : 'REJECTED',
-    ...(decision === 'APPROVE' ? { satisfiedAt: Date.now(), satisfiedBy: actorId } : { satisfiedAt: null, satisfiedBy: null }),
-    verificationDetails: details,
-  });
+  return conditionRepository.updateCondition(conditionId, reviewChanges(condition, actorId, decision, feedback));
 }
 
 function findUniqueByType(escrowId, type) {

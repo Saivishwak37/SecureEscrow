@@ -1,6 +1,36 @@
 # SecureEscrow PostgreSQL design
 
-Phase 1 adds a Prisma schema, a lazy CommonJS client, and versioned PostgreSQL migrations. Express still starts with the in-memory store. There is no database seed or importer in this phase. The design reconciles [SecureEscrow_ER.pdf](../../SecureEscrow_ER.pdf) with the active code at checkpoint `1c1b239` on `feature/postgresql-migration`, descended from `8ff6320`. The referenced presentation was unavailable in the supplied files.
+PostgreSQL is the default persistence for authentication, agreements, simulated financial workflows, disputes and audit. The design follows the current application, with [SecureEscrow_ER.pdf](../../SecureEscrow_ER.pdf) as historical context.
+
+## PostgreSQL runtime boundary
+
+`npm start` and `npm run dev` start PostgreSQL-backed SecureEscrow on loopback port 3000 by default. Startup requires a database connection and leaves existing data intact. The in-memory app remains isolated for Jest. [Endpoint parity](API_PARITY.md)
+
+The PostgreSQL server handles wallet deposits and withdrawals, account and escrow history, transaction details, ledger history and admin reconciliation. It handles whole-agreement funding and release for condition-based escrows and individually funded and released milestones. It persists milestone start, submission, review, revision requests and approvals, and condition verification, review and eligibility.
+
+Dispute creation, evidence metadata, messaging, history and administrative resolution are persistent. Dispute creation atomically locks and freezes the escrow, writes the case, and records both histories. Financial and lifecycle operations check stored freeze state under that same lock. Administrative refunds exist through dispute resolution. The existing API has no ordinary refund route.
+
+The PostgreSQL listener exposes no ADMIN provisioning route or startup seed. Live test runners use the dedicated test role and database. The financial and dispute tests remove their disposable schemas.
+
+Registration creates the user and personal INR wallet through a single nested write. Existing database uniqueness constraints handle races, and expected unique violations become HTTP 409. An escrow transaction rechecks and locks both participant rows and writes the agreement, its holding account, the applicable milestones or conditions, and initial status history together. Draft edits lock the same parent agreement row that the financial and lifecycle writers lock.
+
+## Phase 3 posting contract
+
+- Monetary API fields remain JSON numbers. The server validates the original JSON number text, requires a positive finite amount up to 50,000,000, and allows up to eight fractional places for escrow amounts and two for wallet transfers. Account balance snapshots, including simulated clearing, are bounded to ±50,000,000. This keeps eight-place amounts within the numeric API's resolution. Decimal calculations and signed SQL `NUMERIC` sums determine amounts and balances. Decimal strings carry exact values into PostgreSQL. Responses verify the decimal round trip before emitting a number. Legacy amounts outside the representable API precision fail explicitly.
+- A wallet begins at zero. The first simulated wallet operation creates the per-currency clearing account if needed. A deposit debits clearing and credits the wallet. A withdrawal reverses that direction. Clearing is a simulated offset and may go below zero. Personal and holding sources require sufficient ledger-derived funds. The admin audit also reports the aggregate INR balance across escrow holding accounts.
+- Every posting uses one Prisma transaction. The service locks the actor for authorization, locks the parent escrow when applicable, then locks both accounts in ID order before deriving balances. It writes one completed transfer and one debit and credit pair. It also writes any milestone or escrow state changes and audit history before committing. Posting timestamps are assigned under the account locks and advance monotonically for each affected account. PostgreSQL deferred triggers verify the pair at commit. Deadlocks or serialization failures are retried up to twice.
+- Wallet requests require an `Idempotency-Key` header with 1–128 visible ASCII characters. Keys are scoped by authenticated actor and operation type. A transaction-scoped advisory lock serializes equal keys, and the database unique index protects the persisted key. An exact replay returns the original posting and balance snapshot. Changing the wallet or amount for the same key returns HTTP 409. Use a fresh key for each new intent. The frontend retains the key for a same-intent retry following an ambiguous failure within the current session.
+- Normal funding and release are one-time operations per escrow or milestone. The locked workflow verifies the funding scope and completed postings, and the existing partial unique indexes provide a second line of protection. A duplicate request is rejected. Milestone releases require approval, a matching funded scope and sufficient holding balance. Condition releases require adequate funded balance and every required condition to be satisfied.
+
+The migrations enforce append-only ledger entries, immutable completed transfers and deferrable posting constraints. Migration `20261125000000_resolution_scope` checks existing records, then enforces that a resolution transfer matches the dispute's escrow and nullable milestone. The dispute scope and the resolution's binding to its dispute are immutable.
+
+## Dispute resolution and evidence
+
+- An admin can release the remaining scope to the provider, refund the client, split the full remainder, or partially release to the provider. Available funds are completed funding minus prior scoped releases and refunds, bounded by the holding balance. A partial payout leaves the escrow frozen. Final settlement closes the case and records the affected milestones and escrow status. Other milestones in a milestone-scoped dispute remain usable.
+- Resolution locks the parent escrow and all affected accounts in deterministic order. Transfers, balanced entries, matching allocations, status changes, and actor-tagged history commit in one transaction. The database permits only one active dispute per escrow and one final resolution per dispute. A failed attempt rolls back all financial changes, with a separate best-effort failure audit.
+- Resolution keys are unique per dispute and tied to the acting admin and normalized request. An identical retry returns the original result. Conflicting intent returns 409. A different admin cannot replay the key. The frontend reuses the key after ambiguous failures.
+- Upload authorization runs before multipart parsing and is rechecked under the escrow lock. Generated filenames and private storage keep evidence outside public routes. Metadata includes display filename, validated MIME type and size, and SHA-256 hash. Failed metadata writes remove files when safe. A crash or an ambiguous database failure can leave an orphan file. Back up the local evidence directory with the database and reconcile orphan files administratively.
+- Authorized participants and admins can read evidence and history after settlement. Only participants write evidence and messages, and only while a case is active. The API exposes no history rewrite, admin provisioning, or effect-free close for a case without funds.
 
 ## Runtime inventory and relational mapping
 
@@ -22,7 +52,7 @@ Phase 1 adds a Prisma schema, a lazy CommonJS client, and versioned PostgreSQL m
 | `disputeResolutionAllocations` | `dispute_resolution_allocation` ties one transfer to one allocation and verifies its destination, resolution, currency, type and exact amount through a composite FK. A follow-up migration extends the original FK so conflicting allocation and transfer values cannot both persist. |
 | `escrowStatusHistory` | `escrow_status_history` records actor, previous and next status, reason and time. |
 | `disputeStatusHistory` | `dispute_status_history` records status transitions and execution outcomes, optionally linking a resolution of the same dispute. |
-| Milestone transitions | `milestone_status_history` is available for future writes. The current milestone service updates status without storing a separate history. |
+| Milestone transitions | `milestone_status_history` stores workflow and dispute resolution changes with actors and reasons. |
 
 Escrow and milestone enums follow the shared lifecycle state machine. Conditions progress through `PENDING`, `SUBMITTED`, `REJECTED` and `SATISFIED`. Disputes use `OPEN`, `EVIDENCE_SUBMISSION`, `UNDER_REVIEW` and `RESOLVED`. Transaction statuses are `PENDING`, `COMPLETED` and `FAILED`. The [Prisma schema](../prisma/schema.prisma) and [DBML diagram](SecureEscrow_ER.dbml) list every enum and field.
 
@@ -41,7 +71,7 @@ Controllers and services remain the authority for state transitions, current act
 ## Money and posting
 
 - All monetary values use `NUMERIC(30,8)`, allowing 22 integer and eight fractional digits. Eight fractional digits match existing dispute reconciliation. The wallet still accepts two fractional digits. Validate finite inputs and precision before casting because PostgreSQL rounds to the declared scale. INR is the default; currency codes are uppercase three-letter values, with no currency conversion or currency registry in this phase.
-- Use `Prisma.Decimal` or exact decimal strings internally. Perform arithmetic and equality checks without binary floating-point. Current APIs emit numeric amounts. At cutover, preserve that contract within a documented range and validate decimal round trips at the applicable scale. Values outside that range require an explicit API contract decision to expose exact decimal strings. Convert only at serialization.
+- Use `Prisma.Decimal` or exact decimal strings internally. The PostgreSQL API emits numeric amounts within the Phase 3 posting contract and validates decimal round trips at serialization.
 - The source of truth is the ledger. Compute account balance as credits minus debits. Derive milestone availability from completed scoped funding minus completed scoped outflows. The ledger balance column is a historical snapshot generated during posting. The account table has no mutable balance. Opening balances at cutover need balanced entries against clearing. Clearing can serve as an offset for simulated money.
 - Every completed transfer requires exactly one debit of its amount from its source and one matching credit to its destination. Composite account and transaction FKs enforce currency agreement. Deferred PostgreSQL triggers validate the final posting at commit, disallow entries for pending/failed transfers, and support inserting both entries in one transaction. Triggers reject updates/deletes of completed transfers and updates/deletes/truncation of ledger entries. Corrections use a compensating transfer.
 - Partial unique indexes prevent duplicate completed normal funding/release/refund per scope and duplicate final dispute execution while allowing intermediate partial releases. Resolution keys are unique per dispute. On replay, compare the actor and request fingerprint before returning the original result. Repeatable wallet operations need client-provided or upstream-generated operation keys to distinguish retries from new operations.
@@ -50,7 +80,7 @@ Controllers and services remain the authority for state transitions, current act
 
 Prisma defines primary keys, compound unique and foreign keys, and restricted delete/update actions. Composite keys guard milestone-to-escrow scope, currencies and resolution history scope. Parent/time indexes support ordered history, escrow and wallet queries. PostgreSQL-specific checks, case-folded username/email indexes, account ownership checks, active-dispute uniqueness and posting triggers are in the integrity migration. Financial and audit records use restrictive FKs.
 
-At repository cutover, use an interactive database transaction with stable locking order or serializable isolation and retry. Lock the parent escrow/dispute as applicable and affected account rows before reading balances, testing eligibility or assigning a milestone order. Recompute available funds under the lock. The service transaction must enforce sufficient funds, account status/types and expected owner, milestone allocations and funding ceilings, release model and conditions, scope and amounts of resolution payouts, allocation totals, snapshot correctness, authorization and allowed lifecycle transitions. When resolving a dispute, derive its escrow and milestone from the dispute and reject transfers with a different scope. Keep transfer and allocation type/amount in agreement. Treat all co-dependent writes as one commit:
+Financial and lifecycle writers use the locking protocol above. Resolution derives scope from the locked dispute and escrow, verifies recipients and funds, and keeps each allocation consistent with its transfer. These operations require a single commit:
 
 - User registration and wallet creation.
 - Escrow creation and its account, participants, milestones or conditions.
@@ -58,10 +88,6 @@ At repository cutover, use an interactive database transaction with stable locki
 - Funding, release or refund with state changes, balance snapshots and status history.
 - Dispute opening and escrow freeze, review updates and history, or resolution with all transfers, allocations, audit and final status changes. Record failed attempts separately after rollback if needed.
 
-## Suggested repository migration order
+## Cutover data
 
-1. Add integration fixtures and API adapters, then migrate users and registration with wallet provisioning.
-2. Migrate escrow ownership, milestones, submissions, conditions and history.
-3. Migrate account reads, posting and monetary operations together. Reconcile opening balances and map pooled escrow activity to agreement accounts.
-4. Migrate disputes, messages and private evidence metadata, then resolution and history on top of transactional posting.
-5. Verify role/resource rules, ledger totals, retry/concurrency behavior and response compatibility before switching the application to PostgreSQL.
+Existing PostgreSQL records remain in place. Previous in-memory sessions and their fixture balances are not imported. A legacy private file with no PostgreSQL evidence record is not served by the new runtime.

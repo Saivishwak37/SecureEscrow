@@ -29,10 +29,10 @@ Keep the generated value in the deployment environment or an untracked local `.e
 }
 ```
 
-Protected requests use `Authorization: Bearer <accessToken>`. `GET /api/auth/me` returns the authenticated user's safe profile. In this batch, `/me` is the only business-facing route protected by authentication; escrow, transaction, and dispute routes remain unchanged.
+Protected requests use `Authorization: Bearer <accessToken>`. `GET /api/auth/me` returns the authenticated user's safe profile. All business routes verify identity and enforce their resource authorization rules. [API parity](docs/API_PARITY.md)
 
 Tokens use HS256 and contain `sub` (user ID), `role`, `iat`, and `exp`. Middleware verifies the signature and expiry, resolves `sub` through `UserRepository`, checks that the account is active, and rejects a role claim that differs from the current repository role. It attaches `{ userId, role, user }` to `req.auth`, where `user` contains only `id`, `username`, `email`, and `role`.
 
 ## Limitations
 
-Users are held in memory and do not survive a server restart. Bearer tokens are stateless: this implementation has no refresh tokens, server-side logout, or revocation list. Tokens remain valid until expiry unless the user's account is deactivated, deleted, or its role changes; middleware checks the current user record on each authenticated request. Existing demo users use a separate legacy credential path and are not eligible for email-based JWT login until migrated to credential-backed User records.
+Users and bcrypt hashes persist in PostgreSQL. Public registration creates only CLIENT or PROVIDER users and provisions their wallet atomically. Bearer tokens are stateless. The frontend discards the in-memory token at logout. Until expiry, a token remains valid while its user is active and its role matches the database record. Admin provisioning is deferred. Startup does not create demo credentials.

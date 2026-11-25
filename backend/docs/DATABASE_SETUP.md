@@ -51,7 +51,7 @@ DATABASE_URL=postgresql://secureescrow_dev:replace_me@127.0.0.1:5432/secureescro
 TEST_DATABASE_URL=postgresql://secureescrow_test:replace_me@127.0.0.1:5432/secureescrow_test?schema=public
 ```
 
-`db:migrate` applies the migration files using `prisma migrate deploy` and needs no shadow database. For future migration authoring use `npx.cmd --no-install prisma migrate dev --name describe_change` against an identified development database. That command needs a separate shadow database or a local authoring role allowed to create one. The application continues to use memory in Phase 1.
+`db:migrate` applies the migration files using `prisma migrate deploy` and needs no shadow database. For future migration authoring use `npx.cmd --no-install prisma migrate dev --name describe_change` against an identified development database. That command needs a separate shadow database or a local authoring role allowed to create one.
 
 Verify the tables, constraints and non-internal triggers using the development role. Each command prompts for its password.
 
@@ -71,3 +71,23 @@ npm.cmd run db:test:integrity
 ```
 
 These commands require `TEST_DATABASE_URL` pointing to the local `secureescrow_test` database in the public schema. The Prisma client uses the same guard under `NODE_ENV=test`. The integrity suite verifies the connected database and role before writes, forces deferred constraints to run, and rolls back its fixtures. Existing Jest tests use memory and can run without either database.
+
+## Run the PostgreSQL server
+
+From `backend`, with a migrated development database and the usual local JWT settings:
+
+```powershell
+npm.cmd start
+```
+
+It listens on `127.0.0.1:3000` by default, which matches the frontend. `npm.cmd run dev` uses the same database runtime. `POSTGRES_PORT` takes precedence over `PORT` when set. If using another port, set `VITE_API_BASE_URL` before launching Vite from `frontend` with `npm.cmd run dev`. Keep `DISPUTE_EVIDENCE_STORAGE_DIR` private and persistent across restarts. [Database design](DATABASE_DESIGN.md) · [API parity](API_PARITY.md)
+
+Run the live HTTP integration suite with:
+
+```powershell
+npm.cmd run db:test:core
+npm.cmd run db:test:finance
+npm.cmd run db:test:disputes
+```
+
+The suites check the target database and role before creating fixtures and use separate backend processes to verify restart persistence. Financial and dispute tests use generated schemas within the test database. The dispute suite also uses an isolated private evidence directory.
