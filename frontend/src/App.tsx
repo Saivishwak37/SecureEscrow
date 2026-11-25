@@ -475,7 +475,7 @@ function DashboardPage({ escrows, transactions, role, user, clientName, clientBa
           ) : (
             <div className="grid grid-cols-2 gap-4">
               {escrows.slice(0, 4).map(e => (
-                <EscrowCard key={e.id} escrow={e} role={role} clientName={clientName} onClick={() => { setSelectedEscrowId(e.id); setPage("escrow") }} />
+                <EscrowCard key={e.id} escrow={e} role={role} clientName={clientName} onClick={() => setSelectedEscrowId(e.id)} />
               ))}
             </div>
           )}
@@ -1464,17 +1464,45 @@ function LedgerPage({ entries, summary }: {
 
 // ─── Accounts Page ────────────────────────────────────────────────────────────
 
-function AccountsPage({ currentAccountId, clientAccount, providerAccount, escrowAccount, escrowHeld, clientName, providerName, onTransfer }: {
+function AccountsPage({ currentAccountId, clientAccount, providerAccount, clientName, providerName, onTransfer }: {
   currentAccountId: string
-  clientAccount: BackendAccount | null; providerAccount: BackendAccount | null; escrowAccount: BackendAccount | null
-  escrowHeld?: number
+  clientAccount: BackendAccount | null; providerAccount: BackendAccount | null
   clientName: string; providerName: string
   onTransfer: (operation: "DEPOSIT" | "WITHDRAWAL", amount: number) => Promise<boolean>
 }) {
   const [amount, setAmount] = useState("")
+  const [escrowHeld, setEscrowHeld] = useState<number | undefined>()
+  const [holdingsError, setHoldingsError] = useState(false)
   const [transferLoading, setTransferLoading] = useState(false)
   const currentIsClient = currentAccountId === clientAccount?.id
   const currentAccount = currentIsClient ? clientAccount : providerAccount
+  useEffect(() => {
+    let mounted = true
+    let pending = false
+    const refreshHeld = async () => {
+      if (pending) return
+      pending = true
+      try {
+        const { balance } = await api.getEscrowHeld()
+        if (mounted) {
+          setEscrowHeld(balance)
+          setHoldingsError(false)
+        }
+      } catch {
+        if (mounted) setHoldingsError(true)
+      } finally {
+        pending = false
+      }
+    }
+    void refreshHeld()
+    const timer = window.setInterval(refreshHeld, 6000)
+    window.addEventListener("focus", refreshHeld)
+    return () => {
+      mounted = false
+      window.clearInterval(timer)
+      window.removeEventListener("focus", refreshHeld)
+    }
+  }, [])
   const transfer = async (operation: "DEPOSIT" | "WITHDRAWAL") => {
     const parsedAmount = Number(amount)
     if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) return
@@ -1490,7 +1518,7 @@ function AccountsPage({ currentAccountId, clientAccount, providerAccount, escrow
     currentIsClient
       ? { type: "CLIENT ACCOUNT", name: clientName, id: shortId(currentAccount?.id ?? ""), label: "Available Balance", balance: currentAccount?.balance ?? 0, color: "border-blue-200 bg-blue-50", dot: "bg-blue-500" }
       : { type: "PROVIDER ACCOUNT", name: providerName, id: shortId(currentAccount?.id ?? ""), label: "Available Balance", balance: currentAccount?.balance ?? 0, color: "border-emerald-200 bg-emerald-50", dot: "bg-emerald-500" },
-    { type: "ESCROW ACCOUNT", name: "Held In Escrow", id: shortId(escrowAccount?.id ?? ""), label: "Total Held", balance: escrowHeld ?? escrowAccount?.balance ?? 0, color: "border-violet-200 bg-violet-50", dot: "bg-violet-500" },
+    { type: "ESCROW ACCOUNT", name: "Held In Escrow", label: "Total Held", balance: holdingsError ? undefined : escrowHeld, color: "border-violet-200 bg-violet-50", dot: "bg-violet-500" },
   ]
   return (
     <div className="flex-1 overflow-y-auto">
@@ -1505,9 +1533,11 @@ function AccountsPage({ currentAccountId, clientAccount, providerAccount, escrow
               <div className="px-5 pt-5 pb-4">
                 <div className="flex items-center gap-2 mb-4"><div className={`w-2 h-2 rounded-full ${a.dot}`} /><p className="text-xs font-semibold uppercase tracking-wider text-slate-600">{a.type}</p></div>
                 <p className="font-semibold text-slate-800 mb-1">{a.name}</p>
-                <p className="text-xs text-slate-400 font-mono mb-4">{a.id}</p>
+                <p className="text-xs text-slate-400 font-mono mb-4">{a.id ?? "Your escrows"}</p>
                 <p className="text-xs text-slate-500 uppercase tracking-wide font-medium mb-1">{a.label}</p>
-                <p className="text-2xl font-bold font-mono text-slate-900">{fmt(a.balance)}</p>
+                <p className="text-2xl font-bold font-mono text-slate-900">{a.balance === undefined
+                  ? (holdingsError ? "Unavailable" : "Loading…")
+                  : `₹${a.balance.toLocaleString("en-IN", { maximumFractionDigits: 8 })}`}</p>
               </div>
             </div>
           ))}
@@ -1526,7 +1556,7 @@ function AccountsPage({ currentAccountId, clientAccount, providerAccount, escrow
         </div>
         <div className="bg-white rounded-xl border border-slate-200 px-6 py-4 flex items-center justify-between">
           <div><p className="text-xs text-slate-400 uppercase tracking-wider font-medium">Visible Account Value</p><p className="text-xs text-slate-400 mt-0.5">Personal account plus funds held in escrow</p></div>
-          <p className="text-2xl font-bold font-mono text-slate-900">{fmt(accounts.reduce((s, a) => s + a.balance, 0))}</p>
+          <p className="text-2xl font-bold font-mono text-slate-900">{escrowHeld === undefined || holdingsError ? "—" : fmt((currentAccount?.balance ?? 0) + escrowHeld)}</p>
         </div>
       </div>
     </div>
@@ -1826,7 +1856,6 @@ export default function App() {
   const [clientAccount, setClientAccount] = useState<BackendAccount | null>(null)
   const [providerAccount, setProviderAccount] = useState<BackendAccount | null>(null)
   const [escrowAccount, setEscrowAccount] = useState<BackendAccount | null>(null)
-  const [escrowHeld, setEscrowHeld] = useState<number>()
   const [rawTransactions, setRawTransactions] = useState<BackendTransaction[]>([])
   const [rawLedgerEntries, setRawLedgerEntries] = useState<BackendLedgerEntry[]>([])
   const [ledgerSummary, setLedgerSummary] = useState<{ totalDebits: number; totalCredits: number; balanced: boolean; transactionsValidated: number } | null>(null)
@@ -1910,7 +1939,6 @@ export default function App() {
       setClientAccount(currentRole === "CLIENT" ? ownAccount : null)
       setProviderAccount(currentRole === "PROVIDER" ? ownAccount : null)
       setEscrowAccount(escrowAcc)
-      setEscrowHeld(validation?.escrowHeld)
       setLedgerSummary(validation ? { totalDebits: validation.results.reduce((s, r) => s + r.totalDebits, 0), totalCredits: validation.results.reduce((s, r) => s + r.totalCredits, 0), balanced: validation.allBalanced, transactionsValidated: validation.totalTransactions } : null)
 
       const [escrowTransactions, accountTransactions] = await Promise.all([
@@ -1974,6 +2002,37 @@ export default function App() {
     const timer = window.setInterval(() => { void refreshAll() }, 6000)
     return () => window.clearInterval(timer)
   }, [currentRole, selectedEscrowId, selectedHasActiveDispute, refreshAll])
+
+  const awaitingSubmission = currentRole === "CLIENT" && page === "escrow" && !selectedHasActiveDispute
+    && (selectedEscrow?.milestones?.some(milestone => ["FUNDED", "IN_PROGRESS"].includes(milestone.state)) ?? false)
+  useEffect(() => {
+    if (!awaitingSubmission || !selectedEscrowId || loadingAction) return
+    let active = true
+    let pending = false
+    const refreshMilestones = async () => {
+      if (pending) return
+      pending = true
+      try {
+        const latest = await api.getMilestonesByEscrow(selectedEscrowId)
+        if (!active) return
+        setRawEscrows(rows => rows.map(escrow => {
+          if (escrow.id !== selectedEscrowId) return escrow
+          const current = new Map(escrow.milestones?.map(milestone => [milestone.id, milestone]))
+          return { ...escrow, milestones: latest.map(milestone => {
+            const previous = current.get(milestone.id)
+            return previous && previous.updatedAt > milestone.updatedAt ? previous : milestone
+          }) }
+        }))
+      } catch { /* Keep the last visible milestones and retry on the next poll. */ }
+      finally { pending = false }
+    }
+    void refreshMilestones()
+    const timer = window.setInterval(refreshMilestones, 6000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [awaitingSubmission, selectedEscrowId, loadingAction])
 
   // Default the selected escrow once data arrives.
   useEffect(() => {
@@ -2175,6 +2234,15 @@ export default function App() {
 
   // ─── Account selection (uses real backend users) ────────────────────────
   if (auth.isLoading) return <div className="min-h-screen flex items-center justify-center"><SpinnerIcon /><span className="ml-3">Checking session…</span></div>
+  if (auth.restoreError) return (
+    <div className="min-h-screen flex flex-col items-center justify-center gap-4 px-4 text-center">
+      <p role="alert">We couldn’t verify your session. Try again when the server is available.</p>
+      <div className="flex gap-3">
+        <button className="rounded-md bg-slate-900 px-4 py-2 text-white" onClick={auth.retryRestore}>Retry</button>
+        <button className="rounded-md border border-slate-300 px-4 py-2" onClick={auth.logout}>Sign out</button>
+      </div>
+    </div>
+  )
   if (!currentRole || !authenticatedUser) return <LoginPage onLogin={handleLogin} onRegister={handleRegister} loading={auth.isLoading} error={loginError} />
 
   const user = authenticatedUser
@@ -2236,8 +2304,9 @@ export default function App() {
           {page === "ledger" && <LedgerPage entries={ledger} summary={ledgerSummary} />}
           {page === "accounts" && (
             <AccountsPage
+              key={user.id}
               currentAccountId={currentRole === "CLIENT" ? (clientAccount?.id ?? "") : (providerAccount?.id ?? "")}
-              clientAccount={clientAccount} providerAccount={providerAccount} escrowAccount={escrowAccount} escrowHeld={escrowHeld}
+              clientAccount={clientAccount} providerAccount={providerAccount}
               clientName={clientUser?.name ?? "Test Client"} providerName={providerUser?.name ?? "Test Provider"}
               onTransfer={handleAccountTransfer}
             />

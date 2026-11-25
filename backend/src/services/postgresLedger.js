@@ -1,9 +1,20 @@
 const { randomUUID, createHash } = require('node:crypto');
+const { Prisma } = require('@prisma/client');
 const { API_LIMIT, amount, numericApi } = require('../domain/postgresMoney');
 const { timestamps, assertEscrowAccess, ledgerBalance } = require('../repositories/postgresCore');
 const { ValidationError, ConflictError, NotFoundError, UnauthorizedError, InsufficientBalanceError } = require('../utils/errors');
 
 const orderBy = [{ createdAt: 'asc' }, { id: 'asc' }];
+
+function heldBalances(db, scope) {
+  return db.$queryRaw`
+    SELECT coalesce(sum(CASE WHEN entry.type = 'CREDIT' THEN entry.amount ELSE -entry.amount END), 0) AS balance
+    FROM ledger_entry entry
+    JOIN account ON account.id = entry.account_id
+    JOIN escrow ON escrow.id = account.escrow_id
+    WHERE account.type = 'ESCROW' AND account.currency = 'INR' ${scope}
+  `;
+}
 
 function transactionResponse({ idempotencyKey, requestShape, resolutionId, ...row }) {
   return timestamps({ ...row, amount: numericApi(row.amount) });
@@ -165,11 +176,7 @@ function postgresLedger(db, core) {
         coalesce(sum(e.amount) FILTER (WHERE e.type = 'CREDIT'), 0) AS credits
       FROM "transaction" t LEFT JOIN ledger_entry e ON e.transaction_id = t.id
       GROUP BY t.id ORDER BY t.created_at, t.id
-    `, db.$queryRaw`
-      SELECT coalesce(sum(CASE WHEN e.type = 'CREDIT' THEN e.amount ELSE -e.amount END), 0) AS balance
-      FROM ledger_entry e JOIN account a ON a.id = e.account_id
-      WHERE a.type = 'ESCROW' AND a.currency = 'INR'
-    `], { isolationLevel: 'RepeatableRead' });
+    `, heldBalances(db, Prisma.empty)], { isolationLevel: 'RepeatableRead' });
     const results = rows.map(row => ({
       transactionId: row.transactionId,
       balanced: row.status === 'COMPLETED' ? row.entries === 2 && row.matching === 2 : row.entries === 0,
@@ -178,7 +185,16 @@ function postgresLedger(db, core) {
     return { totalTransactions: results.length, allBalanced: results.every(row => row.balanced), results, escrowHeld: numericApi(holdings[0].balance) };
   }
 
-  return { walletTransfer, accountHistory, escrowHistory, transactionDetails, validateLedger };
+  async function participantHoldings(actor) {
+    if (!['CLIENT', 'PROVIDER'].includes(actor.role)) throw new UnauthorizedError();
+    const scope = actor.role === 'CLIENT'
+      ? Prisma.sql`AND escrow.client_id = ${actor.userId}`
+      : Prisma.sql`AND escrow.provider_id = ${actor.userId}`;
+    const [row] = await heldBalances(db, scope);
+    return { balance: numericApi(row.balance), currency: 'INR' };
+  }
+
+  return { walletTransfer, accountHistory, escrowHistory, transactionDetails, validateLedger, participantHoldings };
 }
 
 module.exports = { postgresLedger, checkActor, postTransfer, runTransaction, transactionResponse };

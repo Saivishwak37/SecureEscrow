@@ -67,4 +67,4 @@ Unknown routes are answered with 404. The root health check is outside `/api` an
 
 ## Limits
 
-The default backend reads identities and resources from PostgreSQL. ADMIN access is explicit on the listed routes. Upload authorization runs before multipart parsing and is repeated under the escrow lock before saving metadata. Private evidence is served through authenticated routes with type and size requirements. Frontend logout clears the in-memory bearer token. [Database and evidence details](docs/DATABASE_DESIGN.md)
+The default backend reads identities and resources from PostgreSQL. ADMIN access is explicit on the listed routes. Upload authorization runs before multipart parsing and is repeated under the escrow lock before saving metadata. Private evidence is served through authenticated routes with type and size requirements. Frontend logout clears the bearer token from memory and session storage. [Database and evidence details](docs/DATABASE_DESIGN.md)

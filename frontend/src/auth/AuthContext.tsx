@@ -7,6 +7,8 @@ type AuthContextValue = {
   token: string | null
   isAuthenticated: boolean
   isLoading: boolean
+  restoreError: boolean
+  retryRestore: () => void
   login: (email: string, password: string) => Promise<api.AuthUser>
   register: (data: Registration) => Promise<api.AuthUser>
   logout: () => void
@@ -14,16 +16,41 @@ type AuthContextValue = {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
+const sessionKey = `secureescrow.session:${api.API_BASE_URL}`
+
+function readSession() {
+  try { return window.sessionStorage.getItem(sessionKey) }
+  catch { return null }
+}
+
+function saveSession(token: string | null) {
+  try {
+    if (token) window.sessionStorage.setItem(sessionKey, token)
+    else window.sessionStorage.removeItem(sessionKey)
+  } catch { /* Storage can be disabled. Sign-in still works in memory. */ }
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<api.AuthUser | null>(null)
   const [token, setToken] = useState<string | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
+  const [isSigningIn, setIsSigningIn] = useState(false)
+  const [savedToken, setSavedToken] = useState(readSession)
+  const [restoreError, setRestoreError] = useState(false)
+  const [restoreAttempt, setRestoreAttempt] = useState(0)
+  const isLoading = isSigningIn || Boolean(savedToken && !restoreError)
 
   const logout = useCallback(() => {
+    saveSession(null)
     api.setAccessToken(null)
     setToken(null)
     setUser(null)
+    setSavedToken(null)
+    setRestoreError(false)
+  }, [])
+
+  const retryRestore = useCallback(() => {
+    setRestoreError(false)
+    setRestoreAttempt(attempt => attempt + 1)
   }, [])
 
   const refreshUser = useCallback(async () => {
@@ -39,18 +66,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [logout, token])
 
   const login = useCallback(async (email: string, password: string) => {
-    setIsLoading(true)
+    setIsSigningIn(true)
     try {
       const result = await api.login(email, password)
       api.setAccessToken(result.accessToken)
-      setToken(result.accessToken)
       // Verify the signed-in identity through the protected endpoint before
       // exposing it to the rest of the application.
-      const verifiedUser = await api.me()
+      let verifiedUser: api.AuthUser
+      try {
+        verifiedUser = await api.me()
+      } catch (error) {
+        logout()
+        throw error
+      }
+      saveSession(result.accessToken)
+      setToken(result.accessToken)
       setUser(verifiedUser)
       return verifiedUser
-    } finally { setIsLoading(false) }
-  }, [])
+    } finally { setIsSigningIn(false) }
+  }, [logout])
 
   const register = useCallback((data: Registration) => api.register(data), [])
 
@@ -59,7 +93,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => api.setUnauthorizedHandler(null)
   }, [logout])
 
-  const value = useMemo(() => ({ user, token, isAuthenticated: Boolean(user && token), isLoading, login, register, logout, refreshUser }), [user, token, isLoading, login, register, logout, refreshUser])
+  useEffect(() => {
+    if (!savedToken) return
+    const controller = new AbortController()
+    api.setAccessToken(savedToken)
+    void api.me(controller.signal).then(current => {
+      if (controller.signal.aborted) return
+      setUser(current)
+      setToken(savedToken)
+      setSavedToken(null)
+    }).catch(error => {
+      if (controller.signal.aborted) return
+      if (error instanceof api.ApiError && error.status === 401) logout()
+      else {
+        api.setAccessToken(null)
+        setRestoreError(true)
+      }
+    })
+    return () => controller.abort()
+  }, [savedToken, restoreAttempt, logout])
+
+  const value = useMemo(() => ({
+    user, token, isAuthenticated: Boolean(user && token), isLoading,
+    restoreError, retryRestore, login, register, logout, refreshUser,
+  }), [user, token, isLoading, restoreError, retryRestore, login, register, logout, refreshUser])
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
 

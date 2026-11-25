@@ -83,6 +83,7 @@ function createPostgresApp(db) {
     if (req.auth.role !== 'ADMIN' && req.auth.userId !== req.params.userId) throw new UnauthorizedError();
     return core.accountDetails({ userId: req.params.userId, type: 'PERSONAL', currency: 'INR' }, req.auth);
   }));
+  api.get('/accounts/escrow-held', participants, respond(req => ledger.participantHoldings(req.auth)));
   api.get('/accounts/:accountId', respond(req => core.accountDetails({ id: req.params.accountId }, req.auth)));
 
   api.post('/escrows', clientOnly, respond(req => core.createEscrow(req.auth, req.body), 201));

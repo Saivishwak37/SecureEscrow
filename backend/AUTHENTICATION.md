@@ -35,4 +35,4 @@ Tokens use HS256 and contain `sub` (user ID), `role`, `iat`, and `exp`. Middlewa
 
 ## Limitations
 
-Users and bcrypt hashes persist in PostgreSQL. Public registration creates only CLIENT or PROVIDER users and provisions their wallet atomically. Bearer tokens are stateless. The frontend discards the in-memory token at logout. Until expiry, a token remains valid while its user is active and its role matches the database record. Admin provisioning is deferred. Startup does not create demo credentials.
+Users and bcrypt hashes persist in PostgreSQL. Public registration creates only CLIENT or PROVIDER users and provisions their wallet atomically. Bearer tokens are stateless. The frontend keeps the access token in tab-scoped session storage so a refresh can verify the session through `/api/auth/me`. Logout or a rejected session clears the token. Until expiry, a token remains valid while its user is active and its role matches the database record. Admin provisioning is deferred. Startup does not create demo credentials.

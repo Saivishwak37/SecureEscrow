@@ -5,6 +5,7 @@ const { ConflictError, NotFoundError, UnauthorizedError, ValidationError } = req
 const draftIncludes = {
   escrowConditionViaEscrow: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] },
 };
+const submissionInclude = { milestoneSubmissionViaMilestone: { orderBy: [{ submittedAt: 'asc' }, { id: 'asc' }] } };
 
 function timestamps(record) {
   return Object.fromEntries(Object.entries(record).map(([key, value]) => [key, value instanceof Date ? value.getTime() : value]));
@@ -153,12 +154,14 @@ function postgresCore(db) {
 
   async function listMilestones(id, actor) {
     await getEscrow(id, actor, db, false);
-    return (await db.milestone.findMany({ where: { escrowId: id }, orderBy: { order: 'asc' } })).map(milestoneResponse);
+    return (await db.milestone.findMany({
+      where: { escrowId: id }, orderBy: { order: 'asc' }, include: submissionInclude,
+    })).map(milestoneResponse);
   }
 
   async function getMilestone(id, actor) {
     const row = await db.milestone.findUnique({
-      where: { id }, include: { milestoneSubmissionViaMilestone: { orderBy: { submittedAt: 'asc' } } },
+      where: { id }, include: submissionInclude,
     });
     if (!row) throw new NotFoundError('Milestone', id);
     await getEscrow(row.escrowId, actor, db, false);
@@ -219,4 +222,4 @@ function postgresCore(db) {
   };
 }
 
-module.exports = { postgresCore, timestamps, escrowResponse, milestoneResponse, conditionResponse, assertEscrowAccess, ledgerBalance };
+module.exports = { postgresCore, timestamps, escrowResponse, milestoneResponse, conditionResponse, assertEscrowAccess, ledgerBalance, submissionInclude };

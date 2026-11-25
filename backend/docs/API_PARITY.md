@@ -13,6 +13,7 @@ Paths below are relative to `/api` except for `/health`. C and P denote CLIENT a
 | POST `/users` | A creates a non-login legacy profile | A may create credential-less C/P profiles. ADMIN creation is excluded. | Disputes |
 | POST `/accounts` | Create wallet for caller | C/P, own INR wallet, duplicate returns 409 | Core |
 | GET `/accounts/user/:userId`, GET `/accounts/:accountId` | Read balance and account | Owner or A, ledger-derived balance | Core, finance |
+| GET `/accounts/escrow-held` | Legacy pooled escrow account | C/P, signed ledger balance for agreements owned by that client or assigned to that provider | Finance |
 | POST `/accounts/:accountId/deposit`, POST `/accounts/:accountId/withdraw` | Simulated wallet transfers | C/P account owner, atomic posting, required retry key | Finance |
 | GET `/accounts/:accountId/ledger`, GET `/accounts/:accountId/transactions` | Wallet history | Owner or A, database-backed histories | Finance |
 | POST `/escrows` | Create agreement for authenticated client | C, active provider validation, atomic creation | Core |

@@ -22,7 +22,7 @@ export interface BackendUser { id: string; name: string; type: BackendRole; crea
 export interface AuthUser { id: string; username: string; email: string; role: BackendRole }
 export const register = (data: { username: string; email: string; password: string; role: "CLIENT" | "PROVIDER" }) => post<AuthUser>("/api/auth/register", data)
 export const login = (email: string, password: string) => post<{ accessToken: string; user: AuthUser }>("/api/auth/login", { email, password })
-export const me = () => get<AuthUser>("/api/auth/me")
+export const me = (signal?: AbortSignal) => request<AuthUser>("/api/auth/me", { signal })
 export const normalizeUser = (user: AuthUser): BackendUser => ({ id: user.id, name: user.username, type: user.role, role: user.role, username: user.username, email: user.email, createdAt: Date.now() })
 export interface BackendCondition {
   id: string; escrowId: string; title: string; description: string; type: string
@@ -105,9 +105,10 @@ export class ApiError extends Error {
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const publicAuthPath = path === "/api/auth/login" || path === "/api/auth/register"
+  const requestToken = publicAuthPath ? null : accessToken
   const headers = new Headers(options.headers)
   if (!(options.body instanceof FormData) && options.body !== undefined) headers.set("Content-Type", "application/json")
-  if (accessToken && !publicAuthPath) headers.set("Authorization", `Bearer ${accessToken}`)
+  if (requestToken) headers.set("Authorization", `Bearer ${requestToken}`)
   let requestBody = options.body
   if (!publicAuthPath && typeof requestBody === "string" && headers.get("Content-Type")?.includes("application/json")) {
     try { const data = JSON.parse(requestBody); delete data.actorId; delete data.role; requestBody = JSON.stringify(data) } catch { /* preserve non-JSON body */ }
@@ -131,7 +132,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   try { body = await res.json() } catch { /* e.g. 204 No Content */ }
 
   if (!res.ok || body?.success === false) {
-    if (res.status === 401) onUnauthorized?.()
+    if (res.status === 401 && !options.signal?.aborted && requestToken && requestToken === accessToken) onUnauthorized?.()
     const message: string = body?.message || `Request failed with status ${res.status}`
     const code: string = body?.error || "UNKNOWN_ERROR"
     throw new ApiError(message, code, res.status, body?.details)
@@ -152,6 +153,7 @@ export const loginDemoUser = (username: string, password: string) => post<Backen
 // ─── Accounts ───────────────────────────────────────────────────────────────
 export const getAccountByUserId = (userId: string) => get<BackendAccount>(`/api/accounts/user/${userId}`)
 export const getAccountById = (accountId: string) => get<BackendAccount>(`/api/accounts/${accountId}`)
+export const getEscrowHeld = () => get<{ balance: number; currency: "INR" }>("/api/accounts/escrow-held")
 export const getAccountLedger = (accountId: string) => get<BackendLedgerEntry[]>(`/api/accounts/${accountId}/ledger`)
 export const getAccountTransactions = (accountId: string) => get<BackendTransaction[]>(`/api/accounts/${accountId}/transactions`)
 const walletTransfer = (accountId: string, operation: "deposit" | "withdraw", amount: number, key: string) =>
@@ -224,12 +226,13 @@ export const getDisputeResolutions = (disputeId: string) => get<BackendDisputeRe
 // the authenticated client; this value is only retained for display compatibility.
 export async function downloadDisputeEvidence(disputeId: string, evidenceId: string): Promise<Blob> {
   const headers = new Headers()
-  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`)
+  const requestToken = accessToken
+  if (requestToken) headers.set("Authorization", `Bearer ${requestToken}`)
   let response: Response
   try { response = await fetch(`${API_BASE_URL}/api/disputes/${encodeURIComponent(disputeId)}/evidence/${encodeURIComponent(evidenceId)}/file`, { headers }) }
   catch { throw new ApiError("Unable to reach the SecureEscrow server. Make sure the backend is running.", "NETWORK_ERROR", 0) }
   if (!response.ok) {
-    if (response.status === 401) onUnauthorized?.()
+    if (response.status === 401 && requestToken && requestToken === accessToken) onUnauthorized?.()
     let message = `Request failed with status ${response.status}`
     try { message = (await response.json())?.message || message } catch { /* file response */ }
     throw new ApiError(message, "DOWNLOAD_FAILED", response.status)

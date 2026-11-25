@@ -8,10 +8,74 @@ import type { BackendCondition, BackendDispute, BackendDisputeEvidence, BackendU
 
 const provider: BackendUser = { id: "payee-1", name: "Provider", type: "PROVIDER", createdAt: 0 }
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+const sessionKey = `secureescrow.session:${api.API_BASE_URL}`
+afterEach(() => {
+  cleanup()
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+  window.sessionStorage.clear()
+  api.setAccessToken(null)
+})
 
 describe("dashboard initial data loading", () => {
-  it("clears the in-memory authorization token on logout", async () => {
+  it("refreshes the held escrow balance on the Accounts page", async () => {
+    const user = { id: "held-client", username: "client", email: "client@example.test", role: "CLIENT" as const }
+    vi.spyOn(api, "login").mockResolvedValue({ accessToken: "signed-token", user })
+    vi.spyOn(api, "me").mockResolvedValue(user)
+    vi.spyOn(api, "getUsers").mockResolvedValue([])
+    vi.spyOn(api, "getAllEscrowsWithReleaseItems").mockResolvedValue([])
+    vi.spyOn(api, "getAccountByUserId").mockResolvedValue({ id: "held-wallet", userId: user.id, balance: 200, currency: "INR", type: "PERSONAL", createdAt: 1 })
+    vi.spyOn(api, "getAllTransactionsForEscrows").mockResolvedValue([])
+    vi.spyOn(api, "getAccountTransactions").mockResolvedValue([])
+    vi.spyOn(api, "getAllLedgerEntriesForTransactions").mockResolvedValue([])
+    vi.spyOn(api, "getEscrowHeld")
+      .mockResolvedValueOnce({ balance: 125.5, currency: "INR" })
+      .mockResolvedValueOnce({ balance: 0, currency: "INR" })
+    render(<AuthProvider><App /></AuthProvider>)
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: user.email } })
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "fixture" } })
+    fireEvent.click(screen.getByRole("button", { name: "Sign In" }))
+    fireEvent.click(await screen.findByRole("button", { name: "Accounts" }))
+    expect(await screen.findByText("₹125.5")).toBeInTheDocument()
+    fireEvent.focus(window)
+    expect(await screen.findByText("₹0")).toBeInTheDocument()
+  })
+
+  it("loads a newly submitted provider file when the client opens the agreement", async () => {
+    const user = { id: "file-client", username: "client", email: "client@example.test", role: "CLIENT" as const }
+    const milestone: api.BackendMilestone = {
+      id: "file-milestone", escrowId: "file-escrow", title: "Deliverable", description: "",
+      amount: 100, status: "IN_PROGRESS", order: 1, createdAt: 1, updatedAt: 1,
+    }
+    const file = { name: "delivery.txt", type: "text/plain", data: "data:text/plain;base64,SGVsbG8=" }
+    vi.spyOn(api, "login").mockResolvedValue({ accessToken: "signed-token", user })
+    vi.spyOn(api, "me").mockResolvedValue(user)
+    vi.spyOn(api, "getUsers").mockResolvedValue([provider])
+    vi.spyOn(api, "getAllEscrowsWithReleaseItems").mockResolvedValue([{
+      id: milestone.escrowId, title: "Delivery agreement", description: "", clientId: user.id, freelancerId: provider.id,
+      totalAmount: 100, status: "IN_PROGRESS", releaseModel: "MILESTONE_BASED",
+      createdAt: 1, updatedAt: 1, milestones: [milestone],
+    }])
+    const getMilestones = vi.spyOn(api, "getMilestonesByEscrow").mockResolvedValue([{
+      ...milestone, status: "SUBMITTED", updatedAt: 2,
+      submissions: [{ attachments: [file], submittedAt: 2, submittedBy: provider.id }],
+    }])
+    vi.spyOn(api, "getAccountByUserId").mockResolvedValue({ id: "file-wallet", userId: user.id, balance: 0, currency: "INR", type: "PERSONAL", createdAt: 0 })
+    vi.spyOn(api, "getAllTransactionsForEscrows").mockResolvedValue([])
+    vi.spyOn(api, "getAccountTransactions").mockResolvedValue([])
+    vi.spyOn(api, "getAllLedgerEntriesForTransactions").mockResolvedValue([])
+    render(<AuthProvider><App /></AuthProvider>)
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: user.email } })
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "fixture" } })
+    fireEvent.click(screen.getByRole("button", { name: "Sign In" }))
+    fireEvent.click(await screen.findByText("Delivery agreement"))
+    await waitFor(() => expect(getMilestones).toHaveBeenCalledWith(milestone.escrowId))
+    const attachment = await screen.findByRole("link", { name: file.name })
+    expect(attachment).toHaveAttribute("download", file.name)
+    expect(attachment).toHaveAttribute("href", file.data)
+  })
+
+  it("clears the authorization token from the API and tab storage on logout", async () => {
     const user = { id: "logout-user", username: "provider", email: "provider@example.test", role: "PROVIDER" as const }
     const setToken = vi.spyOn(api, "setAccessToken")
     vi.spyOn(api, "login").mockResolvedValue({ user, accessToken: "fixture-token" })
@@ -24,9 +88,54 @@ describe("dashboard initial data loading", () => {
     }
     render(<AuthProvider><Session /></AuthProvider>)
     fireEvent.click(screen.getByRole("button", { name: "Begin Session" }))
-    fireEvent.click(await screen.findByRole("button", { name: "End Session" }))
+    const signOut = await screen.findByRole("button", { name: "End Session" })
+    expect(window.sessionStorage.getItem(sessionKey)).toBe("fixture-token")
+    fireEvent.click(signOut)
     expect(setToken.mock.calls).toEqual([["fixture-token"], [null]])
+    expect(window.sessionStorage.getItem(sessionKey)).toBeNull()
     expect(screen.getByRole("button", { name: "Begin Session" })).toBeInTheDocument()
+  })
+
+  it("restores a session after a reload with the saved bearer token", async () => {
+    const user = { id: "saved-admin", username: "admin", email: "admin@example.test", role: "ADMIN" as const }
+    window.sessionStorage.setItem(sessionKey, "saved-token")
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: user }), { status: 200 }))
+    vi.stubGlobal("fetch", fetch)
+    function Session() {
+      const auth = useAuth()
+      return <span>{auth.isLoading ? "Checking session" : auth.user?.role ?? "Sign in"}</span>
+    }
+    render(<AuthProvider><Session /></AuthProvider>)
+    expect(screen.getByText("Checking session")).toBeInTheDocument()
+    expect(screen.queryByText("Sign in")).not.toBeInTheDocument()
+    expect(await screen.findByText("ADMIN")).toBeInTheDocument()
+    expect(fetch.mock.calls[0][0]).toBe(api.API_BASE_URL + "/api/auth/me")
+    expect(new Headers(fetch.mock.calls[0][1].headers).get("Authorization")).toBe("Bearer saved-token")
+  })
+
+  it("clears a saved token the backend rejects and returns to sign-in", async () => {
+    window.sessionStorage.setItem(sessionKey, "expired-token")
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ message: "Expired" }), { status: 401 })))
+    render(<AuthProvider><App /></AuthProvider>)
+    expect(await screen.findByRole("button", { name: "Sign In" })).toBeInTheDocument()
+    expect(window.sessionStorage.getItem(sessionKey)).toBeNull()
+  })
+
+  it("preserves the session and lets you retry when the backend is unavailable", async () => {
+    window.sessionStorage.setItem(sessionKey, "saved-token")
+    const user = { id: "saved-client", username: "client", email: "client@example.test", role: "CLIENT" as const }
+    const me = vi.spyOn(api, "me")
+      .mockRejectedValueOnce(new api.ApiError("Unavailable", "NETWORK_ERROR", 0))
+      .mockResolvedValueOnce(user)
+    function Session() {
+      const auth = useAuth()
+      return auth.restoreError ? <button onClick={auth.retryRestore}>Retry</button> : <span>{auth.user?.username}</span>
+    }
+    render(<AuthProvider><Session /></AuthProvider>)
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }))
+    expect(await screen.findByText("client")).toBeInTheDocument()
+    expect(window.sessionStorage.getItem(sessionKey)).toBe("saved-token")
+    expect(me).toHaveBeenCalledTimes(2)
   })
 
   it("loads once after login instead of repeating requests on loading-state renders", async () => {

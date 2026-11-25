@@ -42,6 +42,7 @@ test('PostgreSQL financial workflows', async t => {
   }), 201);
   const milestoneFor = async escrow => verify(await get(client, `/api/escrows/${escrow.id}/milestones`), 200)[0];
   const balance = async (actor, target = app) => verify(await get(actor, `/api/accounts/${actor.wallet.id}`, target), 200).balance;
+  const held = async actor => verify(await get(actor, '/api/accounts/escrow-held'), 200).balance;
   let deposit, milestoneEscrow, milestone, conditionEscrow;
 
   await t.test('wallet validation, decimal postings, retries, and history authorization', async () => {
@@ -100,10 +101,16 @@ test('PostgreSQL financial workflows', async t => {
     const funded = await overlap(db, lock, [() => post(client, fund, body), () => post(client, fund, body, concurrentApp)]);
     assert.deepEqual(funded.map(response => response.status).sort(), [200, 409]);
     assert.equal(await balance(client), 7.87654322);
+    assert.deepEqual(await Promise.all([held(client), held(provider), held(outsider)]), [7.12345678, 7.12345678, 0]);
     verify(await post(provider, `/api/escrows/${id}/start`, body), 200);
     const attachment = { name: 'work.txt', type: 'text/plain', data: 'data:text/plain;base64,SGVsbG8=' };
     verify(await post(client, path + '/submit', { attachments: [attachment] }), 403);
     verify(await post(provider, path + '/submit', { attachments: [attachment] }), 200);
+    const [submitted] = verify(await get(client, `/api/escrows/${id}/milestones`), 200);
+    assert.equal(submitted.status, 'SUBMITTED');
+    assert.equal(submitted.submissions[0].submittedBy, provider.user.id);
+    assert.deepEqual(submitted.submissions[0].attachments, [attachment]);
+    verify(await get(outsider, `/api/escrows/${id}/milestones`), 403);
     verify(await post(client, path + '/review'), 200);
     verify(await post(client, path + '/reject', { feedback: 'Please revise' }), 200);
     verify(await post(provider, path + '/submit', { attachments: [attachment] }), 200);
@@ -123,6 +130,7 @@ test('PostgreSQL financial workflows', async t => {
     const releases = await overlap(db, lock, [() => post(client, path + '/release'), () => post(client, path + '/release', {}, concurrentApp)]);
     assert.deepEqual(releases.map(response => response.status).sort(), [200, 409]);
     assert.equal(await balance(provider), 7.12345678);
+    assert.deepEqual(await Promise.all([held(client), held(provider), held(outsider)]), [0, 0, 0]);
     assert.equal(await balance(outsider), 0);
     const saved = verify(await get(client, path), 200);
     assert.deepEqual(saved.submissions.map(row => row.reviewFeedback), ['Please revise', null]);

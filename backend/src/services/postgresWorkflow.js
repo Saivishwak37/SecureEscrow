@@ -2,12 +2,11 @@ const { Decimal } = require('../domain/postgresMoney');
 const { transition, getValidActions } = require('../domain/escrowStateMachine');
 const normalizeAttachments = require('../domain/milestoneSubmission');
 const { conditionActorRole, satisfactionChanges, reviewChanges } = require('../domain/conditionWorkflow');
-const { escrowResponse, milestoneResponse, conditionResponse, assertEscrowAccess } = require('../repositories/postgresCore');
+const { escrowResponse, milestoneResponse, conditionResponse, assertEscrowAccess, submissionInclude } = require('../repositories/postgresCore');
 const { runTransaction, checkActor, postTransfer, transactionResponse } = require('./postgresLedger');
 const { ConflictError, NotFoundError, UnauthorizedError, ValidationError } = require('../utils/errors');
 
 const blocked = ['DISPUTED', 'CANCELLED', 'EXPIRED', 'RESOLVED', 'RELEASED'];
-const submissionInclude = { milestoneSubmissionViaMilestone: { orderBy: [{ submittedAt: 'asc' }, { id: 'asc' }] } };
 const participantRole = { PAYER: 'CLIENT', CLIENT: 'CLIENT', PAYEE: 'PROVIDER', PROVIDER: 'PROVIDER' };
 
 function canAct(escrow, actor, role) {
