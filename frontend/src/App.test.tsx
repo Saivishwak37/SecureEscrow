@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import "@testing-library/jest-dom/vitest"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import App, { AdminDisputeManagement, CreateEscrowModal, ConditionManagement, DisputeActivityPanel, DisputeEvidencePanel, EscrowDetailsPage } from "./App"
@@ -18,6 +18,59 @@ afterEach(() => {
 })
 
 describe("dashboard initial data loading", () => {
+  it("shows escrow, milestone, and account names in Transactions and Ledger", async () => {
+    const user = { id: "payer-uuid", username: "Jordan Shah", email: "client@example.test", role: "CLIENT" as const }
+    const wallet = { id: "payer-wallet-uuid", userId: user.id, balance: 100, currency: "INR", type: "PERSONAL" as const, createdAt: 0 }
+    const escrowId = "escrow-uuid"
+    const milestoneId = "milestone-uuid"
+    const funding: api.BackendTransaction = {
+      id: "funding-uuid", type: "FUND", status: "COMPLETED", amount: 100, escrowId, milestoneId,
+      fromAccountId: wallet.id, toAccountId: "holding-wallet-uuid", createdAt: 1,
+    }
+    const release: api.BackendTransaction = {
+      ...funding, id: "release-uuid", type: "RELEASE", fromAccountId: funding.toAccountId, toAccountId: "provider-wallet-uuid", createdAt: 2,
+    }
+    const deposit: api.BackendTransaction = {
+      ...funding, id: "deposit-uuid", type: "DEPOSIT", escrowId: null, milestoneId: null,
+      fromAccountId: "clearing-wallet-uuid", toAccountId: wallet.id, createdAt: 3,
+    }
+    window.sessionStorage.setItem(sessionKey, "saved-token")
+    vi.spyOn(api, "me").mockResolvedValue(user)
+    vi.spyOn(api, "getUsers").mockResolvedValue([{ ...provider, name: "Riya Rao" }])
+    vi.spyOn(api, "getAccountByUserId").mockResolvedValue(wallet)
+    vi.spyOn(api, "getAllEscrowsWithReleaseItems").mockResolvedValue([{
+      id: escrowId, title: "PropSync", description: "", clientId: user.id, freelancerId: provider.id,
+      totalAmount: 100, status: "RELEASED", releaseModel: "MILESTONE_BASED", createdAt: 0, updatedAt: 0,
+      milestones: [{ id: milestoneId, escrowId, title: "Core workflows", description: "", amount: 100, status: "RELEASED", order: 1, createdAt: 0, updatedAt: 0 }],
+    }])
+    vi.spyOn(api, "getAllTransactionsForEscrows").mockResolvedValue([funding, release])
+    vi.spyOn(api, "getAccountTransactions").mockResolvedValue([funding, deposit])
+    vi.spyOn(api, "getAllLedgerEntriesForTransactions").mockResolvedValue([funding, release, deposit].flatMap(tx => [
+      { id: tx.id + "-debit", transactionId: tx.id, accountId: tx.fromAccountId, type: "DEBIT", amount: tx.amount, balance: 0, createdAt: 0 },
+      { id: tx.id + "-credit", transactionId: tx.id, accountId: tx.toAccountId, type: "CREDIT", amount: tx.amount, balance: 100, createdAt: 0 },
+    ]))
+
+    render(<AuthProvider><App /></AuthProvider>)
+    fireEvent.click(await screen.findByRole("button", { name: "Transactions" }))
+    const fundingRow = (await screen.findByRole("button", { name: "PropSync" })).closest("tr")!
+    expect(within(fundingRow).getByText("Core workflows")).toBeInTheDocument()
+    expect(within(fundingRow).getByText("Jordan Shah Account → Escrow Account")).toBeInTheDocument()
+    expect(screen.getByText("External Clearing → Jordan Shah Account")).toBeInTheDocument()
+    fireEvent.click(within(fundingRow).getByRole("button", { name: "PropSync" }))
+    expect(screen.getByText("Details")).toBeInTheDocument()
+    expect(screen.getAllByText("Core workflows")).toHaveLength(2)
+    expect(document.body).not.toHaveTextContent(/funding-|release-|deposit-|escrow-u|-uuid|\bmileston\b/i)
+    expect(screen.queryByText("Transaction ID")).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole("button", { name: "View Ledger Entries" }))
+    const ledger = screen.getByRole("table")
+    expect(await within(ledger).findByText("Riya Rao Account")).toBeInTheDocument()
+    expect(within(ledger).getAllByText("PropSync")).toHaveLength(4)
+    expect(within(ledger).getAllByText("Core workflows")).toHaveLength(4)
+    expect(within(ledger).getByText("External Clearing")).toBeInTheDocument()
+    expect(ledger).not.toHaveTextContent(/funding-|release-|deposit-|-uuid/i)
+  })
+
   it("loads providers for escrow creation after restoring a client session", async () => {
     const user = { id: "restored-client", username: "client", email: "client@example.test", role: "CLIENT" as const }
     window.sessionStorage.setItem(sessionKey, "saved-client-token")
@@ -457,18 +510,56 @@ describe("release-model condition and milestone forms", () => {
 describe("escrow dispute creation form", () => {
   const baseEscrow = {
     id: "escrow-1", title: "Purchase", description: "Agreement", domain: "Goods",
-    providerName: "Provider", providerId: "payee-1", clientId: "payer-1", totalAmount: 100,
+    providerName: "Provider", clientName: "Client", totalAmount: 100,
     releaseModel: "Milestone Based" as const, state: "CREATED" as const, milestones: [], conditions: [],
     disputes: [], releaseEligible: false, releaseBlockedReason: "Not funded", disputed: false,
     createdAt: "2026-01-01 00:00:00",
   }
   const commonProps = {
-    escrow: baseEscrow, role: "CLIENT" as const, clientName: "Client",
+    escrow: baseEscrow, role: "CLIENT" as const,
     currentUserId: "payer-1", users: [provider],
     onAction: vi.fn(), onConditionAction: vi.fn(), onConditionCreate: vi.fn(), onConditionUpdate: vi.fn(),
     onConditionDelete: vi.fn(), onConditionSatisfy: vi.fn(), onConditionReviewWork: vi.fn(),
     loadingAction: null, onBack: vi.fn(),
   }
+
+  it("shows only the milestone lifecycle when there is one milestone", () => {
+    const milestone = { id: "design", title: "Design", description: "", amount: 100, state: "UNDER_REVIEW" as const, order: 1 }
+    render(<EscrowDetailsPage {...commonProps} escrow={{ ...baseEscrow, milestones: [milestone] }} onDisputeCreate={vi.fn()} />)
+    const lifecycle = screen.getByRole("list", { name: "Design lifecycle" })
+    expect(within(lifecycle).getByText("Under Review").closest("li")).toHaveAttribute("aria-current", "step")
+    expect(screen.queryByRole("list", { name: "Milestone checkpoints" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("progressbar", { name: "Milestones closed" })).not.toBeInTheDocument()
+  })
+
+  it("shows ordered checkpoints and updates progress from each milestone's own state", () => {
+    const design = { id: "design", title: "Design", description: "", amount: 100, state: "RELEASED" as const, order: 1 }
+    const delivery = { id: "delivery", title: "Delivery", description: "", amount: 100, state: "IN_PROGRESS" as const, order: 2 }
+    const onDisputeCreate = vi.fn()
+    const { rerender } = render(<EscrowDetailsPage {...commonProps} escrow={{ ...baseEscrow, milestones: [delivery, design] }} onDisputeCreate={onDisputeCreate} />)
+    const overview = screen.getByRole("list", { name: "Milestone checkpoints" })
+    expect(within(overview).getAllByRole("link").map(link => link.textContent)).toEqual(["Design", "Delivery"])
+    expect(within(overview).getByRole("link", { name: "Delivery" })).toHaveAttribute("href", "#milestone-delivery")
+    const progress = screen.getByRole("progressbar", { name: "Milestones closed" })
+    expect(progress).toHaveAttribute("aria-valuenow", "1")
+    expect(progress).toHaveAttribute("aria-valuemax", "2")
+    expect(screen.queryByRole("list", { name: "Design lifecycle" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("list", { name: "Delivery lifecycle" })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "View more for Design" }))
+    expect(within(screen.getByRole("list", { name: "Design lifecycle" })).getByText("Released").closest("li")).toHaveAttribute("aria-current", "step")
+    expect(screen.queryByRole("list", { name: "Delivery lifecycle" })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "View less for Design" }))
+    expect(screen.queryByRole("list", { name: "Design lifecycle" })).not.toBeInTheDocument()
+    fireEvent.click(within(overview).getByRole("link", { name: "Delivery" }))
+    expect(screen.getByRole("button", { name: "View less for Delivery" })).toHaveAttribute("aria-expanded", "true")
+    expect(within(screen.getByRole("list", { name: "Delivery lifecycle" })).getByText("In Progress").closest("li")).toHaveAttribute("aria-current", "step")
+
+    rerender(<EscrowDetailsPage {...commonProps} escrow={{ ...baseEscrow, milestones: [{ ...delivery, state: "CANCELLED" }, design] }} onDisputeCreate={onDisputeCreate} />)
+    expect(progress).toHaveAttribute("aria-valuenow", "2")
+    const cancelledLifecycle = screen.getByRole("list", { name: "Delivery lifecycle" })
+    expect(within(cancelledLifecycle).getByText("CANCELLED").closest("li")).toHaveAttribute("aria-current", "step")
+    expect(within(cancelledLifecycle).queryByText("Released")).not.toBeInTheDocument()
+  })
 
   it("submits the required dispute details", async () => {
     const createDispute = vi.fn().mockResolvedValue(undefined)
@@ -485,8 +576,19 @@ describe("escrow dispute creation form", () => {
 
   it("does not require or show a milestone for condition-based agreements", () => {
     render(<EscrowDetailsPage {...commonProps} escrow={{ ...baseEscrow, releaseModel: "Condition Based" }} onDisputeCreate={vi.fn().mockResolvedValue(undefined)} />)
+    expect(screen.getByRole("list", { name: "Escrow lifecycle" })).toBeInTheDocument()
+    expect(screen.queryByRole("list", { name: "Milestone checkpoints" })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole("button", { name: "Raise Dispute" }))
     expect(screen.queryByLabelText("Related milestone (optional)")).not.toBeInTheDocument()
+  })
+
+  it("keeps the milestone lifecycle visible during a dispute while hiding submission actions", () => {
+    const milestone = { id: "design", title: "Design", description: "", amount: 100, state: "IN_PROGRESS" as const, order: 1 }
+    const escrow = { ...baseEscrow, disputed: true, state: "DISPUTED" as const, milestones: [milestone] }
+    render(<EscrowDetailsPage {...commonProps} escrow={escrow} role="PROVIDER" onDisputeCreate={vi.fn()} />)
+    expect(screen.getByRole("list", { name: "Design lifecycle" })).toBeInTheDocument()
+    expect(screen.queryByLabelText("Choose work files to submit")).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Submit for Review" })).not.toBeInTheDocument()
   })
 
   it("defaults a milestone-based dispute to a specific milestone instead of the whole escrow", () => {
@@ -513,8 +615,8 @@ describe("escrow dispute creation form", () => {
       ],
     }
     render(<EscrowDetailsPage {...commonProps} role="PROVIDER" escrow={escrow} onAction={onAction} onDisputeCreate={vi.fn().mockResolvedValue(undefined)} />)
-    expect(screen.getByText("First phase")).toBeInTheDocument()
-    expect(screen.getByText("Second phase")).toBeInTheDocument()
+    expect(screen.getByRole("heading", { name: "First phase" })).toBeInTheDocument()
+    expect(screen.getByRole("heading", { name: "Second phase" })).toBeInTheDocument()
     const file = new File(["phase two work"], "phase-two.pdf", { type: "application/pdf" })
     fireEvent.change(screen.getAllByLabelText("Choose work files to submit")[0], { target: { files: [file] } })
     fireEvent.click(screen.getAllByRole("button", { name: "Submit for Review" })[0])
@@ -560,7 +662,7 @@ describe("admin dispute management", () => {
     }
     const escrow = {
       id: "escrow-admin", title: "Website project", description: "", domain: "General", providerName: "Provider",
-      providerId: "payee-1", clientId: "payer-1", totalAmount: 100, releaseModel: "Milestone Based" as const,
+      clientName: "Client", totalAmount: 100, releaseModel: "Milestone Based" as const,
       state: "DISPUTED" as const, milestones: [], conditions: [], disputes: [dispute], releaseEligible: false,
       releaseBlockedReason: "Disputed", disputed: true, createdAt: "today",
     }
@@ -605,7 +707,7 @@ describe("admin dispute management", () => {
     }
     const escrow = {
       id: dispute.escrowId, title: "Unfunded agreement", description: "", domain: "General", providerName: "Provider",
-      providerId: "payee-1", clientId: "payer-1", totalAmount: 100, releaseModel: "Milestone Based" as const,
+      clientName: "Client", totalAmount: 100, releaseModel: "Milestone Based" as const,
       state: "DISPUTED" as const, milestones: [], conditions: [], disputes: [dispute], releaseEligible: false,
       releaseBlockedReason: "Disputed", disputed: true, createdAt: "today",
     }
@@ -625,7 +727,7 @@ describe("admin dispute management", () => {
     }
     const escrow = {
       id: "escrow-request", title: "Delivery agreement", description: "", domain: "General", providerName: "Provider",
-      providerId: "payee-1", clientId: "payer-1", totalAmount: 0, releaseModel: "Milestone Based" as const,
+      clientName: "Client", totalAmount: 0, releaseModel: "Milestone Based" as const,
       state: "DISPUTED" as const, milestones: [], conditions: [], disputes: [dispute], releaseEligible: false,
       releaseBlockedReason: "Disputed", disputed: true, createdAt: "today",
     }

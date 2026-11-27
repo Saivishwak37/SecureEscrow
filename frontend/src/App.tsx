@@ -33,9 +33,8 @@ interface Escrow {
   title: string
   description: string
   domain: string
+  clientName: string
   providerName: string
-  providerId: string
-  clientId: string
   totalAmount: number
   releaseModel: ReleaseModel
   state: EscrowState
@@ -54,6 +53,7 @@ interface Transaction {
   escrowId: string | null
   escrowTitle: string
   milestoneId: string
+  milestoneTitle?: string
   amount: number
   from: string
   to: string
@@ -64,8 +64,8 @@ interface Transaction {
 }
 
 interface LedgerEntry {
-  txId: string
-  txType: "FUND" | "RELEASE" | "REFUND" | "DEPOSIT" | "WITHDRAWAL"
+  id: string
+  transaction?: Transaction
   account: string
   entryType: "DEBIT" | "CREDIT"
   amount: number
@@ -84,6 +84,7 @@ interface Toast {
 const STATE_ORDER: EscrowState[] = [
   "CREATED", "FUNDED", "IN_PROGRESS", "SUBMITTED", "UNDER_REVIEW", "APPROVED", "RELEASED",
 ]
+const CLOSED_MILESTONE_STATES = new Set<EscrowState>(["RELEASED", "CANCELLED", "RESOLVED"])
 
 const LIFECYCLE = [
   { state: "CREATED" as EscrowState, label: "Created", desc: "Escrow agreement created" },
@@ -121,8 +122,7 @@ function greeting() {
 function deriveEscrowState(milestones: Milestone[]): EscrowState {
   if (milestones.length === 0) return "CREATED"
   const sorted = [...milestones].sort((a, b) => a.order - b.order)
-  const terminal = ["RELEASED", "CANCELLED", "RESOLVED"]
-  const active = sorted.find(m => !terminal.includes(m.state))
+  const active = sorted.find(m => !CLOSED_MILESTONE_STATES.has(m.state))
   if (active) return active.state
   if (milestones.every(m => m.state === "RELEASED")) return "RELEASED"
   if (milestones.every(m => m.state === "CANCELLED")) return "CANCELLED"
@@ -352,7 +352,7 @@ function Sidebar({ page, setPage, role, user, onSwitch }: {
 
 // ─── Escrow Card ──────────────────────────────────────────────────────────────
 
-function EscrowCard({ escrow, role, clientName, onClick }: { escrow: Escrow; role: Role; clientName: string; onClick: () => void }) {
+function EscrowCard({ escrow, role, onClick }: { escrow: Escrow; role: Role; onClick: () => void }) {
   const idx = stateIdx(escrow.state)
   const progress = Math.round((idx / (STATE_ORDER.length - 1)) * 100)
 
@@ -374,11 +374,11 @@ function EscrowCard({ escrow, role, clientName, onClick }: { escrow: Escrow; rol
       </div>
       <div className="px-5 py-4">
         {role === "ADMIN" ? <div className="grid grid-cols-3 gap-3 mb-4 text-xs">
-          {[["Client", clientName], ["Provider", escrow.providerName], ["Release Model", escrow.releaseModel]].map(([label, value]) => <div key={label}>
+          {[["Client", escrow.clientName], ["Provider", escrow.providerName], ["Release Model", escrow.releaseModel]].map(([label, value]) => <div key={label}>
             <p className="text-slate-400 uppercase tracking-wide font-medium mb-1">{label}</p><p className="text-slate-700 font-medium">{value}</p>
           </div>)}
         </div> : <div className="grid grid-cols-2 gap-4 mb-4 text-xs">
-          <div><p className="text-slate-400 uppercase tracking-wide font-medium mb-1">{role === "CLIENT" ? "Provider" : "Client"}</p><p className="text-slate-700 font-medium">{role === "CLIENT" ? escrow.providerName : clientName}</p></div>
+          <div><p className="text-slate-400 uppercase tracking-wide font-medium mb-1">{role === "CLIENT" ? "Provider" : "Client"}</p><p className="text-slate-700 font-medium">{role === "CLIENT" ? escrow.providerName : escrow.clientName}</p></div>
           <div><p className="text-slate-400 uppercase tracking-wide font-medium mb-1">Release Model</p><p className="text-slate-700 font-medium">{escrow.releaseModel}</p></div>
         </div>}
         <div>
@@ -403,8 +403,8 @@ function EscrowCard({ escrow, role, clientName, onClick }: { escrow: Escrow; rol
 
 // ─── Dashboard Page ───────────────────────────────────────────────────────────
 
-function DashboardPage({ escrows, transactions, role, user, clientName, clientBalance, providerBalance, setPage, setSelectedEscrowId, onCreateEscrow }: {
-  escrows: Escrow[]; transactions: Transaction[]; role: Role; user: BackendUser; clientName: string
+function DashboardPage({ escrows, transactions, role, user, clientBalance, providerBalance, setPage, setSelectedEscrowId, onCreateEscrow }: {
+  escrows: Escrow[]; transactions: Transaction[]; role: Role; user: BackendUser
   clientBalance: number; providerBalance: number
   setPage: (p: Page) => void; setSelectedEscrowId: (id: string) => void; onCreateEscrow: () => void
 }) {
@@ -475,7 +475,7 @@ function DashboardPage({ escrows, transactions, role, user, clientName, clientBa
           ) : (
             <div className="grid grid-cols-2 gap-4">
               {escrows.slice(0, 4).map(e => (
-                <EscrowCard key={e.id} escrow={e} role={role} clientName={clientName} onClick={() => setSelectedEscrowId(e.id)} />
+                <EscrowCard key={e.id} escrow={e} role={role} onClick={() => setSelectedEscrowId(e.id)} />
               ))}
             </div>
           )}
@@ -556,8 +556,8 @@ function DashboardPage({ escrows, transactions, role, user, clientName, clientBa
                   {tx.type === "DEPOSIT" ? "Funds Added to Account" : tx.type === "WITHDRAWAL" ? "Funds Withdrawn" : tx.type === "FUND" ? "Funds Added to Escrow" : "Payment Released"}
                 </p>
 
-                <p className="text-[11px] text-slate-400 font-mono truncate">
-                  {shortId(tx.id)} · {tx.timestamp}
+                <p className="truncate text-xs text-slate-500">
+                  {tx.milestoneTitle ?? tx.escrowTitle} · {tx.timestamp}
                 </p>
               </div>
             </div>
@@ -599,7 +599,7 @@ function AdminDashboardPage({ escrows, transactions, users, onViewEscrows, onVie
     <div className="mb-8"><p className="text-xs font-semibold uppercase tracking-widest text-amber-700">Platform Administration</p><h1 className="mt-1 text-2xl font-bold text-slate-900">Admin Dashboard</h1><p className="mt-1 text-sm text-slate-500">Escrow overview and dispute review.</p></div>
     <div className="mb-8 grid grid-cols-4 gap-4">{cards.map(card => <div key={card.label} className="rounded-xl border border-slate-200 bg-white p-5"><p className="mb-3 text-xs font-medium uppercase tracking-wider text-slate-500">{card.label}</p><p className="font-mono text-2xl font-bold text-slate-900">{card.value}</p><p className="mt-1 text-xs text-slate-400">{card.detail}</p></div>)}</div>
     <div className="mb-8 flex items-center justify-between"><div><h2 className="text-sm font-semibold uppercase tracking-wider text-slate-700">Recent Escrows</h2><p className="mt-1 text-xs text-slate-500">{users.length} demo users · {transactions.length} recorded transactions</p></div><button onClick={onViewEscrows} className="text-xs font-medium text-blue-600 hover:text-blue-700">View all escrows →</button></div>
-    {escrows.length ? <div className="grid grid-cols-2 gap-4">{[...escrows].slice(-4).reverse().map(escrow => <EscrowCard key={escrow.id} escrow={escrow} role="ADMIN" clientName={users.find(user => user.id === escrow.clientId)?.name ?? "Client"} onClick={() => onOpenEscrow(escrow.id)} />)}</div> : <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">No escrow agreements have been created.</div>}
+    {escrows.length ? <div className="grid grid-cols-2 gap-4">{[...escrows].slice(-4).reverse().map(escrow => <EscrowCard key={escrow.id} escrow={escrow} role="ADMIN" onClick={() => onOpenEscrow(escrow.id)} />)}</div> : <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">No escrow agreements have been created.</div>}
     <div className="mt-8 flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 p-5"><div><h2 className="font-semibold text-slate-800">Dispute management</h2><p className="mt-1 text-sm text-slate-600">{disputedCount} active dispute{disputedCount === 1 ? "" : "s"} need review.</p></div><Btn onClick={onViewDisputes}>Open Disputes</Btn></div>
     <div className="mt-6 flex justify-end"><button onClick={onViewTransactions} className="text-xs font-medium text-blue-600 hover:text-blue-700">Review platform transactions →</button></div>
   </div></div>
@@ -706,8 +706,8 @@ export function AdminDisputeManagement({ escrows, transactions, actorId, onRefre
 
 // ─── Escrow List Page ─────────────────────────────────────────────────────────
 
-function EscrowListPage({ escrows, role, clientName, setSelectedEscrowId, onCreateEscrow }: {
-  escrows: Escrow[]; role: Role; clientName: string; setSelectedEscrowId: (id: string) => void; onCreateEscrow: () => void
+function EscrowListPage({ escrows, role, setSelectedEscrowId, onCreateEscrow }: {
+  escrows: Escrow[]; role: Role; setSelectedEscrowId: (id: string) => void; onCreateEscrow: () => void
 }) {
   return (
     <div className="flex-1 overflow-y-auto">
@@ -728,7 +728,7 @@ function EscrowListPage({ escrows, role, clientName, setSelectedEscrowId, onCrea
         ) : (
           <div className="grid grid-cols-2 gap-4">
             {escrows.map(e => (
-              <EscrowCard key={e.id} escrow={e} role={role} clientName={clientName} onClick={() => setSelectedEscrowId(e.id)} />
+              <EscrowCard key={e.id} escrow={e} role={role} onClick={() => setSelectedEscrowId(e.id)} />
             ))}
           </div>
         )}
@@ -743,51 +743,113 @@ function LifecycleTimeline({ current }: { current: EscrowState }) {
   const currentIdx = stateIdx(current)
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-6">
-      <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-6">Lifecycle</h3>
-      <div className="relative">
-        <div className="absolute left-4 top-4 bottom-4 w-px bg-slate-200" />
-        <div className="absolute left-4 top-4 w-px bg-blue-500 transition-all duration-500"
-          style={{ height: `${Math.max(0, (currentIdx / (STATE_ORDER.length - 1)) * 100)}%` }} />
-        <div className="space-y-0">
-          {LIFECYCLE.map(({ state, label, desc }, i) => {
-            const done = i < currentIdx, active = i === currentIdx
-            return (
-              <div key={state} className={`flex gap-5 ${i < LIFECYCLE.length - 1 ? "pb-5" : ""}`}>
-                <div className="relative z-10 flex-shrink-0">
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center border-2 transition-all duration-300 ${
-                    done ? "bg-blue-600 border-blue-600 text-white" :
-                    active ? "bg-white border-blue-600 text-blue-600 ring-4 ring-blue-100" :
-                    "bg-white border-slate-300 text-slate-400"}`}>
-                    {done ? <CheckIcon size={12} /> : active ? <div className="w-2.5 h-2.5 bg-blue-600 rounded-full" /> : <div className="w-2 h-2 bg-slate-300 rounded-full" />}
-                  </div>
-                </div>
-                <div className="pt-1">
-                  <p className={`text-sm font-semibold ${active ? "text-blue-700" : done ? "text-slate-700" : "text-slate-400"}`}>{label}</p>
-                  <p className={`text-xs mt-0.5 ${active ? "text-blue-500" : "text-slate-400"}`}>{desc}</p>
-                </div>
+      <h3 className="mb-4 text-xs font-semibold uppercase tracking-wider text-slate-500">Escrow lifecycle</h3>
+      <ol aria-label="Escrow lifecycle" className="flex overflow-x-auto pt-1 pb-2">
+        {LIFECYCLE.map(({ state, label, desc }, i) => {
+          const done = i < currentIdx, active = i === currentIdx
+          return (
+            <li key={state} aria-current={active ? "step" : undefined} className="relative flex min-w-32 flex-1 flex-col items-center gap-2 px-2 text-center">
+              {i < LIFECYCLE.length - 1 && <span aria-hidden="true" className={`absolute top-4 left-1/2 h-px w-full ${done ? "bg-blue-500" : "bg-slate-200"}`} />}
+              <div aria-hidden="true" className={`relative z-10 flex size-8 shrink-0 items-center justify-center rounded-full border-2 transition-all duration-300 ${
+                done ? "bg-blue-600 border-blue-600 text-white" :
+                active ? "bg-white border-blue-600 text-blue-600 ring-4 ring-blue-100" :
+                "bg-white border-slate-300 text-slate-400"}`}>
+                {done ? <CheckIcon size={12} /> : active ? <div className="w-2.5 h-2.5 bg-blue-600 rounded-full" /> : <div className="w-2 h-2 bg-slate-300 rounded-full" />}
               </div>
-            )
-          })}
-        </div>
-      </div>
+              <div>
+                <p className={`text-sm font-semibold ${active ? "text-blue-700" : done ? "text-slate-700" : "text-slate-400"}`}>{label}</p>
+                <p className={`text-xs mt-0.5 ${active ? "text-blue-500" : "text-slate-400"}`}>{desc}</p>
+              </div>
+            </li>
+          )
+        })}
+      </ol>
     </div>
   )
 }
 
 // ─── Milestone Card ───────────────────────────────────────────────────────────
 
-function MilestoneCard({ milestone, role, onAction, loadingAction }: {
-  milestone: Milestone; role: Role
+function MilestoneOverview({ milestones, onOpenMilestone }: { milestones: Milestone[]; onOpenMilestone: (id: string) => void }) {
+  const closedCount = milestones.filter(milestone => CLOSED_MILESTONE_STATES.has(milestone.state)).length
+
+  return (
+    <aside aria-label="Escrow lifecycle" className="rounded-xl border border-slate-200 bg-white p-5">
+      <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-600">Escrow lifecycle</h3>
+      <p className="mt-2 text-base font-medium text-slate-700">{closedCount} of {milestones.length} milestones closed</p>
+      <div role="progressbar" aria-label="Milestones closed" aria-valuenow={closedCount} aria-valuemin={0} aria-valuemax={milestones.length} className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+        <div className="h-full rounded-full bg-blue-600" style={{ width: `${closedCount / milestones.length * 100}%` }} />
+      </div>
+      <ol aria-label="Milestone checkpoints" className="mt-5 flex overflow-x-auto pb-2">
+        {milestones.map((milestone, index) => {
+          const closed = CLOSED_MILESTONE_STATES.has(milestone.state)
+          const markerColor = milestone.state === "RELEASED" ? "bg-emerald-600 text-white"
+            : closed || milestone.state === "CREATED" ? "bg-slate-100 text-slate-600"
+              : "bg-blue-100 text-blue-800"
+          return (
+            <li key={milestone.id} className="relative flex min-w-44 flex-1 flex-col items-center gap-2 px-2 text-center">
+              {index < milestones.length - 1 && <span aria-hidden="true" className="absolute top-4 left-1/2 h-px w-full bg-slate-200" />}
+              <span aria-hidden="true" className={`relative grid size-8 shrink-0 place-items-center rounded-full text-sm font-semibold ${markerColor}`}>
+                {milestone.state === "RELEASED" ? <CheckIcon size={14} /> : index + 1}
+              </span>
+              <div className="min-w-0 space-y-1">
+                <a href={`#milestone-${milestone.id}`} onClick={() => onOpenMilestone(milestone.id)} className="block rounded-sm text-base leading-snug font-semibold text-slate-800 wrap-anywhere hover:text-blue-700 hover:underline focus-visible:outline-2 focus-visible:outline-blue-600">{milestone.title}</a>
+                <Badge state={milestone.state} />
+              </div>
+            </li>
+          )
+        })}
+      </ol>
+    </aside>
+  )
+}
+
+function MilestoneLifecycle({ milestone }: { milestone: Milestone }) {
+  const currentIndex = LIFECYCLE.findIndex(step => step.state === milestone.state)
+  const currentStep = LIFECYCLE[currentIndex]
+
+  return (
+    <div className="@container rounded-lg border border-slate-100 bg-slate-50 px-4 py-4">
+      <h4 className="mb-4 text-sm font-semibold text-slate-800">Milestone lifecycle</h4>
+      {currentStep ? (
+        <>
+          <ol aria-label={`${milestone.title} lifecycle`} className="grid @lg:grid-cols-7">
+            {LIFECYCLE.map(({ state, label }, index) => {
+              const done = index < currentIndex
+              const current = index === currentIndex
+              return (
+                <li key={state} aria-current={current ? "step" : undefined} className="relative flex items-center gap-2 not-last:pb-3 @lg:flex-col @lg:text-center @lg:not-last:pb-0">
+                  {index < LIFECYCLE.length - 1 && <span aria-hidden="true" className={`absolute -bottom-3 left-3 top-3 w-px @lg:bottom-auto @lg:left-1/2 @lg:h-px @lg:w-full ${done ? "bg-blue-500" : "bg-slate-300"}`} />}
+                  <span aria-hidden="true" className={`relative grid size-6 shrink-0 place-items-center rounded-full border text-xs ${done ? "border-blue-600 bg-blue-600 text-white" : current ? "border-blue-600 bg-white text-blue-600 ring-2 ring-blue-100" : "border-slate-300 bg-slate-50 text-slate-400"}`}>
+                    {done ? <CheckIcon size={12} /> : <span className="size-1.5 rounded-full bg-current" />}
+                  </span>
+                  <span className={`px-1 text-sm leading-snug ${current ? "font-semibold text-blue-700" : "text-slate-600"}`}>{label}</span>
+                </li>
+              )
+            })}
+          </ol>
+          <p className="mt-4 text-sm text-slate-600">{milestone.state === "CREATED" ? "Milestone created and awaiting funding" : currentStep.desc}</p>
+        </>
+      ) : (
+        <ol aria-label={`${milestone.title} lifecycle`}>
+          <li aria-current="step"><Badge state={milestone.state} /></li>
+        </ol>
+      )}
+    </div>
+  )
+}
+
+function MilestoneCard({ milestone, role, blocked, expanded, onToggleDetails, onAction, loadingAction }: {
+  milestone: Milestone; role: Role; blocked: boolean; expanded: boolean; onToggleDetails: () => void
   onAction: (action: string, milestoneId: string, payload?: { attachments?: { name: string; type: string; data: string }[]; feedback?: string }) => void | Promise<void>; loadingAction: string | null
 }) {
   const [files, setFiles] = useState<File[]>([])
   const [feedback, setFeedback] = useState("")
   const [submissionError, setSubmissionError] = useState("")
+  const detailsId = `milestone-details-${milestone.id}`
+  const detailsLabel = expanded ? "View less" : "View more"
   const totalFileSize = files.reduce((total, file) => total + file.size, 0)
   const filesAreValid = files.length > 0 && files.length <= 5 && files.every(file => file.size <= 5 * 1024 * 1024) && totalFileSize <= 7 * 1024 * 1024
-  const idx = stateIdx(milestone.state)
-  const progress = Math.round((idx / (STATE_ORDER.length - 1)) * 100)
-  const milestoneClosed = ["RELEASED", "CANCELLED", "RESOLVED"].includes(milestone.state)
 
   // CLIENT actions
   const clientActions: Partial<Record<EscrowState, { label: string; action: string; variant: "primary" | "secondary" | "danger" }>> = {
@@ -823,59 +885,53 @@ function MilestoneCard({ milestone, role, onAction, loadingAction }: {
   }
 
   return (
-    <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-      <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between">
-        <div>
-          <p className="text-xs text-slate-400 font-mono font-medium mb-0.5">{shortId(milestone.id)}</p>
-          <h3 className="text-base font-semibold text-slate-900">{milestone.title}</h3>
-          {milestone.description && <p className="mt-0.5 whitespace-pre-wrap break-words text-xs text-slate-500">{milestone.description}</p>}
+    <article id={`milestone-${milestone.id}`} tabIndex={-1} className="scroll-mt-6 overflow-hidden rounded-xl border border-slate-200 bg-white">
+      <div className="@container px-4 py-5 sm:px-6">
+        <div className="grid items-start gap-3 @md:grid-cols-[minmax(0,1fr)_auto]">
+          <div>
+            <p className="mb-1 font-mono text-xs font-medium text-slate-500">{shortId(milestone.id)}</p>
+            <h3 className="text-lg leading-snug font-semibold text-slate-900 wrap-anywhere">{milestone.title}</h3>
+            {!expanded && milestone.description && <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-slate-600 wrap-anywhere">{milestone.description}</p>}
+          </div>
+          <div className="@md:text-right">
+            <p className="font-mono text-xl font-bold text-slate-900">{fmt(milestone.amount)}</p>
+            <div className="mt-1"><Badge state={milestone.state} /></div>
+          </div>
         </div>
-        <div className="text-right flex-shrink-0 ml-4">
-          <p className="text-xl font-bold font-mono text-slate-900">{fmt(milestone.amount)}</p>
-          <div className="mt-1"><Badge state={milestone.state} /></div>
+        <button type="button" aria-expanded={expanded} aria-controls={detailsId} aria-label={`${detailsLabel} for ${milestone.title}`}
+          onClick={onToggleDetails} className="mt-4 inline-flex cursor-pointer items-center gap-1.5 rounded-md bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100 focus-visible:outline-2 focus-visible:outline-blue-600">
+          {detailsLabel}
+          <span aria-hidden="true" className={expanded ? "-rotate-90" : "rotate-90"}><ChevronRightIcon /></span>
+        </button>
+        <div id={detailsId} hidden={!expanded} className="mt-4 space-y-4">
+          {milestone.description && <p className="text-sm leading-relaxed whitespace-pre-wrap text-slate-700 wrap-anywhere">{milestone.description}</p>}
+          {expanded && <MilestoneLifecycle milestone={milestone} />}
         </div>
       </div>
-      <div className="px-6 py-5">
-        <div className="mb-5">
-          <div className="flex justify-between text-xs mb-1.5">
-            <span className="text-slate-500">Completion</span>
-            <span className="font-mono font-medium text-slate-700">{progress}%</span>
-          </div>
-          <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
-            <div className="h-full rounded-full transition-all duration-700"
-              style={{ width: `${milestoneClosed ? 100 : progress}%`, background: milestoneClosed ? "#10B981" : "#2563EB" }} />
-          </div>
-        </div>
-
-        <div className="bg-slate-50 rounded-lg px-4 py-3 mb-5 text-xs">
-          <p className="text-slate-400 mb-1">Current state</p>
-          <Badge state={milestone.state} />
-          <p className="text-slate-500 mt-2">{LIFECYCLE.find(l => l.state === milestone.state)?.desc ?? (milestoneClosed ? "Closed milestone" : "")}</p>
-        </div>
-
+      {!blocked && <div className="border-t border-slate-100 px-4 py-4 sm:px-6">
         <div className="flex flex-wrap items-center gap-3">
           {currentAction?.action === "SUBMIT" && (
             <div className="w-full space-y-2">
-              <p className="text-xs font-medium text-slate-700">Submit your work files</p>
-              <label className="flex min-h-24 w-full cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-blue-300 bg-blue-50/60 px-4 py-4 text-center transition-colors hover:border-blue-500 hover:bg-blue-50 focus-within:ring-2 focus-within:ring-blue-500">
+              <p className="text-sm font-medium text-slate-700">Submit your work files</p>
+              <label className="relative flex min-h-24 w-full cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-blue-300 bg-blue-50/60 px-4 py-4 text-center transition-colors hover:border-blue-500 hover:bg-blue-50 focus-within:ring-2 focus-within:ring-blue-500">
                 <span className="rounded-md bg-white px-4 py-2 text-sm font-semibold text-blue-700 shadow-sm">Choose files</span>
                 <span className="mt-2 text-xs text-slate-500">Select up to 5 files · 5 MB each · 7 MB total</span>
-                <input aria-label="Choose work files to submit" className="sr-only" type="file" multiple onChange={e => { setFiles(Array.from(e.target.files ?? [])); setSubmissionError("") }} />
+                <input aria-label="Choose work files to submit" className="absolute inset-0 h-full w-full cursor-pointer opacity-0 file:h-full file:w-full file:cursor-pointer" type="file" multiple onChange={e => { setFiles(Array.from(e.target.files ?? [])); setSubmissionError("") }} />
               </label>
-              {files.length > 0 && <ul className="space-y-1 text-xs text-slate-600">{files.map((file, index) => <li key={`${file.name}-${index}`} className="flex justify-between gap-3"><span className="truncate">{file.name}</span><span className="shrink-0">{(file.size / (1024 * 1024)).toFixed(2)} MB</span></li>)}</ul>}
-          {files.length > 0 && !filesAreValid && <p className="text-xs text-red-600">Choose up to 5 files, no larger than 5 MB each or 7 MB combined.</p>}
-          {submissionError && <p role="alert" className="text-xs text-red-600">{submissionError}</p>}
+              {files.length > 0 && <ul className="space-y-1 text-sm text-slate-600">{files.map((file, index) => <li key={`${file.name}-${index}`} className="flex justify-between gap-3"><span className="truncate">{file.name}</span><span className="shrink-0">{(file.size / (1024 * 1024)).toFixed(2)} MB</span></li>)}</ul>}
+              {files.length > 0 && !filesAreValid && <p className="text-xs text-red-600">Choose up to 5 files, no larger than 5 MB each or 7 MB combined.</p>}
+              {submissionError && <p role="alert" className="text-xs text-red-600">{submissionError}</p>}
             </div>
           )}
-          {milestone.reviewFeedback && ["IN_PROGRESS", "SUBMITTED", "UNDER_REVIEW"].includes(milestone.state) && <p className="w-full rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">Revision requested: {milestone.reviewFeedback}</p>}
+          {milestone.reviewFeedback && ["IN_PROGRESS", "SUBMITTED", "UNDER_REVIEW"].includes(milestone.state) && <p className="w-full rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">Revision requested: {milestone.reviewFeedback}</p>}
           {milestone.submissions?.length ? <div className="w-full space-y-2">
-            <p className="text-xs font-medium text-slate-500">Provider submissions</p>
+            <p className="text-sm font-semibold text-slate-700">Provider submissions</p>
             {milestone.submissions.map((submission, index) => <div key={`${submission.submittedAt}-${index}`} className="rounded-lg border border-slate-100 p-3">
               <p className="mb-2 text-xs text-slate-400">Submission {index + 1} · {new Date(submission.submittedAt).toLocaleString()}</p>
-              <div className="flex flex-wrap gap-2">{submission.attachments.map((file, fileIndex) => <a key={`${file.name}-${fileIndex}`} href={file.data} download={file.name} target="_blank" rel="noreferrer" className="text-xs font-medium text-blue-700 underline">{file.name}</a>)}</div>
+              <div className="flex flex-wrap gap-2">{submission.attachments.map((file, fileIndex) => <a key={`${file.name}-${fileIndex}`} href={file.data} download={file.name} target="_blank" rel="noreferrer" className="max-w-full wrap-anywhere text-sm font-medium text-blue-700 underline">{file.name}</a>)}</div>
             </div>)}
           </div> : null}
-          {milestone.state === "UNDER_REVIEW" && role === "CLIENT" && <label className="w-full text-xs text-slate-600">Feedback for provider if revisions are needed
+          {milestone.state === "UNDER_REVIEW" && role === "CLIENT" && <label className="w-full text-sm text-slate-600">Feedback for provider if revisions are needed
             <textarea className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" rows={2} value={feedback} onChange={e => setFeedback(e.target.value)} placeholder="Explain what should be changed" />
           </label>}
           {currentAction ? (
@@ -898,14 +954,14 @@ function MilestoneCard({ milestone, role, onAction, loadingAction }: {
               {currentAction.label}
             </Btn>
           ) : milestone.state === "UNDER_REVIEW" && role === "CLIENT" ? null : (
-            <p className="text-xs text-slate-400 italic">
+            <p className="text-sm text-slate-600">
               {role === "ADMIN" ? "Read-only administrator view." : waitingMessage[milestone.state] ?? "No action available in this state."}
             </p>
           )}
           {milestone.state === "UNDER_REVIEW" && role === "CLIENT" && <Btn variant="danger" size="sm" disabled={!feedback.trim()} loading={loadingAction === `${milestone.id}-REJECT`} onClick={() => onAction("REJECT", milestone.id, { feedback })}>Request Revision</Btn>}
         </div>
-      </div>
-    </div>
+      </div>}
+    </article>
   )
 }
 
@@ -1139,8 +1195,8 @@ export function DisputeConversation({ dispute, actorId }: {
   </section>
 }
 
-export function EscrowDetailsPage({ escrow, role, clientName, currentUserId, users, onAction, onConditionAction, onConditionCreate, onConditionUpdate, onConditionDelete, onConditionSatisfy, onConditionReviewWork, onDisputeCreate, loadingAction, onBack }: {
-  escrow: Escrow; role: Role; clientName: string
+export function EscrowDetailsPage({ escrow, role, currentUserId, users, onAction, onConditionAction, onConditionCreate, onConditionUpdate, onConditionDelete, onConditionSatisfy, onConditionReviewWork, onDisputeCreate, loadingAction, onBack }: {
+  escrow: Escrow; role: Role
   currentUserId: string; users: BackendUser[]
   onAction: (action: string, milestoneId: string) => void
   onConditionAction: (action: string) => void
@@ -1159,8 +1215,12 @@ export function EscrowDetailsPage({ escrow, role, clientName, currentUserId, use
   const [requestedResolution, setRequestedResolution] = useState<RequestedResolution>("OTHER")
   const [disputeMilestoneId, setDisputeMilestoneId] = useState("")
   const [disputeError, setDisputeError] = useState("")
+  const [milestoneDetails, setMilestoneDetails] = useState<Record<string, boolean>>({})
   const disputeBusy = loadingAction === "dispute-create"
   const hasOpenDispute = escrow.disputes.some(dispute => dispute.status !== "RESOLVED")
+  const isConditionBased = escrow.releaseModel === "Condition Based"
+  const milestones = isConditionBased ? [] : [...(escrow.milestones ?? [])].sort((a, b) => a.order - b.order)
+  const showMilestoneOverview = milestones.length > 1
   const submitDispute = async () => {
     if (!disputeTitle.trim() || !disputeDescription.trim()) return
     setDisputeError("")
@@ -1173,58 +1233,59 @@ export function EscrowDetailsPage({ escrow, role, clientName, currentUserId, use
     } catch (error) { setDisputeError(extractApiErrorMessage(error)) }
   }
   const toggleDisputeForm = () => {
-    if (!disputeFormOpen && !disputeMilestoneId && escrow.milestones?.length) setDisputeMilestoneId(escrow.milestones[0].id)
+    if (!disputeFormOpen && !disputeMilestoneId && milestones.length) setDisputeMilestoneId(milestones[0].id)
     setDisputeFormOpen(open => !open)
   }
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="max-w-5xl mx-auto px-8 py-8">
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <div className="max-w-5xl mx-auto px-4 py-8 sm:px-8">
         <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-800 transition-colors mb-6">
           <ArrowLeftIcon /> Back to Escrows
         </button>
 
-        <div className="flex items-start justify-between mb-8">
-          <div>
-            <div className="flex items-center gap-3 mb-1">
-              <h1 className="text-2xl font-bold text-slate-900">{escrow.title}</h1>
+        <div className="mb-8 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-8">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-3 mb-1">
+              <h1 className="text-3xl font-bold tracking-tight text-slate-900 wrap-anywhere">{escrow.title}</h1>
               <Badge state={escrow.state} />
             </div>
             <p className="text-slate-500 text-sm">{escrow.domain} · {shortId(escrow.id)} · {escrow.releaseModel}</p>
-            {escrow.description && <p className="text-slate-400 text-sm mt-1">{escrow.description}</p>}
+            {escrow.description && <p className="mt-2 text-base leading-relaxed text-slate-600 wrap-anywhere">{escrow.description}</p>}
           </div>
-          <div className="text-right flex-shrink-0 ml-6">
-            <p className="text-3xl font-bold font-mono text-slate-900">{fmt(escrow.totalAmount)}</p>
-            <p className="text-xs text-slate-400 mt-1">Total escrow value</p>
+          <div className="lg:text-right">
+            <p className="font-mono text-3xl font-bold text-slate-900">{fmt(escrow.totalAmount)}</p>
+            <p className="mt-1 text-sm text-slate-600">Total escrow value</p>
           </div>
         </div>
 
         {/* Participants */}
-        <div className="grid grid-cols-2 gap-4 mb-8">
+        <div className="grid gap-4 mb-8 md:grid-cols-2">
           {[
-            { roleLabel: "Client / Payer", name: clientName, id: escrow.clientId, note: "Approves and releases funds", badge: "CLIENT", isMe: role === "CLIENT" },
-            { roleLabel: "Provider / Payee", name: escrow.providerName, id: escrow.providerId, note: "Delivers work, receives payment", badge: "PROVIDER", isMe: role === "PROVIDER" },
+            { roleLabel: "Client / Payer", name: escrow.clientName, note: "Approves and releases funds", badge: "CLIENT", isMe: role === "CLIENT" },
+            { roleLabel: "Provider / Payee", name: escrow.providerName, note: "Delivers work, receives payment", badge: "PROVIDER", isMe: role === "PROVIDER" },
           ].map(p => (
             <div key={p.roleLabel} className={`bg-white rounded-xl border px-5 py-4 flex items-center gap-4 ${p.isMe ? "border-blue-200 bg-blue-50/30" : "border-slate-200"}`}>
               <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-semibold text-sm flex-shrink-0 ${p.badge === "CLIENT" ? "bg-blue-600" : "bg-violet-600"}`}>
                 {p.name.split(" ").map((w: string) => w[0]).join("").slice(0, 2)}
               </div>
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 mb-0.5">
+                <div className="flex flex-wrap items-center gap-2 mb-0.5">
                   <p className="text-xs text-slate-400 uppercase tracking-wide font-medium">{p.roleLabel}</p>
                   <Badge state={p.badge} />
                   {p.isMe && <span className="text-xs text-blue-600 font-medium">(you)</span>}
                 </div>
-                <p className="font-semibold text-slate-900 text-sm">{p.name}</p>
-                <p className="text-xs text-slate-400 font-mono">{p.id} · {p.note}</p>
+                <p className="font-semibold text-slate-900 text-sm wrap-anywhere">{p.name}</p>
+                <p className="text-xs text-slate-400">{p.note}</p>
               </div>
             </div>
           ))}
         </div>
 
         {/* Layout */}
-        <div className="grid grid-cols-[260px_1fr] gap-6">
-          <LifecycleTimeline current={escrow.state} />
-          <div className="space-y-4">
+        <div className="space-y-6">
+          {showMilestoneOverview && <MilestoneOverview milestones={milestones} onOpenMilestone={id => setMilestoneDetails(previous => ({ ...previous, [id]: true }))} />}
+          {isConditionBased && <LifecycleTimeline current={escrow.state} />}
+          <div className="min-w-0 space-y-4">
             {escrow.disputed && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">This escrow is disputed. Funding and release actions are blocked while the Admin reviews the dispute.</div>}
             {escrow.disputes.length > 0 && <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-3">
               <h3 className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Disputes</h3>
@@ -1246,7 +1307,7 @@ export function EscrowDetailsPage({ escrow, role, clientName, currentUserId, use
                 <label className="text-xs font-medium text-slate-600">Category<select className="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={disputeCategory} onChange={event => setDisputeCategory(event.target.value as DisputeCategory)}>{["NON_DELIVERY", "INCOMPLETE_DELIVERY", "QUALITY_ISSUE", "PAYMENT_ISSUE", "CONDITION_NOT_FULFILLED", "AGREEMENT_VIOLATION", "OTHER"].map(value => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
                 <label className="text-xs font-medium text-slate-600">Requested resolution<select className="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={requestedResolution} onChange={event => setRequestedResolution(event.target.value as RequestedResolution)}>{["RELEASE_TO_PROVIDER", "REFUND_TO_CLIENT", "PARTIAL_RELEASE", "SPLIT_FUNDS", "OTHER"].map(value => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
               </div>
-              {escrow.releaseModel === "Milestone Based" && escrow.milestones && escrow.milestones.length > 0 && <label className="block text-xs font-medium text-slate-600">Related milestone (selected by default; choose Escrow level for a whole-agreement dispute)<select className="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={disputeMilestoneId} onChange={event => setDisputeMilestoneId(event.target.value)}><option value="">Escrow level</option>{escrow.milestones.map(milestone => <option key={milestone.id} value={milestone.id}>{milestone.title}</option>)}</select></label>}
+              {milestones.length > 0 && <label className="block text-xs font-medium text-slate-600">Related milestone (selected by default; choose Escrow level for a whole-agreement dispute)<select className="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={disputeMilestoneId} onChange={event => setDisputeMilestoneId(event.target.value)}><option value="">Escrow level</option>{milestones.map(milestone => <option key={milestone.id} value={milestone.id}>{milestone.title}</option>)}</select></label>}
               <label className="block text-xs font-medium text-slate-600">Description<textarea className="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" rows={4} required value={disputeDescription} onChange={event => setDisputeDescription(event.target.value)} /></label>
               {disputeError && <p role="alert" className="text-sm text-red-600">{disputeError}</p>}
               <div className="flex justify-end"><Btn loading={disputeBusy} disabled={!disputeTitle.trim() || !disputeDescription.trim()} onClick={submitDispute}>Submit Dispute</Btn></div>
@@ -1260,10 +1321,13 @@ export function EscrowDetailsPage({ escrow, role, clientName, currentUserId, use
                   : "Administrator view — agreement details are read-only."}
             </div>
 
-            {!escrow.disputed && escrow.milestones?.map(m => (
-              <MilestoneCard key={m.id} milestone={m} role={role} onAction={onAction} loadingAction={loadingAction} />
+            {milestones.map(milestone => (
+              <MilestoneCard key={milestone.id} milestone={milestone} role={role} blocked={escrow.disputed}
+                expanded={milestoneDetails[milestone.id] ?? !showMilestoneOverview}
+                onToggleDetails={() => setMilestoneDetails(previous => ({ ...previous, [milestone.id]: !(previous[milestone.id] ?? !showMilestoneOverview) }))}
+                onAction={onAction} loadingAction={loadingAction} />
             ))}
-            {escrow.releaseModel === "Condition Based" && <>
+            {isConditionBased && <>
               <ConditionManagement conditions={escrow.conditions} canEdit={role === "CLIENT" && escrow.state === "CREATED" && !escrow.disputed} canRespond={escrow.state !== "CREATED" && !escrow.disputed && !["RELEASED", "CANCELLED", "EXPIRED"].includes(escrow.state)} role={role} onCreate={onConditionCreate} onUpdate={onConditionUpdate} onDelete={onConditionDelete} onSatisfy={onConditionSatisfy} onReviewWork={onConditionReviewWork} busy={Boolean(loadingAction)} />
               <div className="bg-white rounded-xl border border-slate-200 px-5 py-4 space-y-3">
                 <p className={`text-sm ${escrow.releaseEligible ? "text-emerald-700" : "text-amber-700"}`}>{escrow.releaseEligible ? "All required conditions are satisfied; release is eligible." : escrow.releaseBlockedReason}</p>
@@ -1279,7 +1343,7 @@ export function EscrowDetailsPage({ escrow, role, clientName, currentUserId, use
               <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-4">Agreement Details</h3>
               <div className="grid grid-cols-2 gap-y-3 text-xs">
                 {[["Escrow ID", shortId(escrow.id)], ["Domain", escrow.domain], ["Release Model", escrow.releaseModel],
-                  ["Created", escrow.createdAt.slice(0, 10)], ["Provider", escrow.providerName], ["Provider ID", escrow.providerId]
+                  ["Created", escrow.createdAt.slice(0, 10)]
                 ].map(([k, v]) => (
                   <div key={k}>
                     <p className="text-slate-400">{k}</p>
@@ -1302,13 +1366,14 @@ function TransactionsPage({ transactions, currentAccountId, onViewLedger }: {
   currentAccountId?: string
   onViewLedger: () => void
 }) {
-  const [selected, setSelected] = useState<Transaction | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
 
   // Show only transactions that involve the currently selected user's account.
   // The backend remains the source of truth; this is only a role/account view filter.
   const visibleTransactions = currentAccountId
     ? transactions.filter(tx => tx.fromAccountId === currentAccountId || tx.toAccountId === currentAccountId)
     : transactions
+  const selected = visibleTransactions.find(tx => tx.id === selectedId)
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -1335,11 +1400,15 @@ function TransactionsPage({ transactions, currentAccountId, onViewLedger }: {
               <tbody className="divide-y divide-slate-50">
                 {visibleTransactions.length === 0 && <tr><td colSpan={5} className="px-5 py-12 text-center text-slate-400 text-sm">No transactions recorded yet.</td></tr>}
                 {visibleTransactions.map(tx => (
-                  <tr key={tx.id} onClick={() => setSelected(tx)}
-                    className={`cursor-pointer hover:bg-slate-50 transition-colors ${selected?.id === tx.id ? "bg-blue-50" : ""}`}>
-                    <td className="px-4 py-4"><p className="font-mono text-xs text-slate-400">{shortId(tx.id)}</p><p className="text-slate-600 text-xs mt-0.5 truncate max-w-32">{tx.escrowTitle}</p></td>
+                  <tr key={tx.id} onClick={() => setSelectedId(tx.id)}
+                    className={`cursor-pointer hover:bg-slate-50 transition-colors ${selectedId === tx.id ? "bg-blue-50" : ""}`}>
+                    <td className="px-4 py-4">
+                      <button type="button" className="text-left text-sm font-semibold text-slate-800 wrap-anywhere hover:text-blue-700">{tx.escrowTitle}</button>
+                      {tx.milestoneTitle && <p className="mt-0.5 text-xs text-slate-600 wrap-anywhere">{tx.milestoneTitle}</p>}
+                      <p className="mt-0.5 text-xs text-slate-500">{tx.timestamp}</p>
+                    </td>
                     <td className="px-4 py-4"><Badge state={tx.type} /></td>
-                    <td className="px-4 py-4 text-xs text-slate-600">{tx.from} → {tx.to}</td>
+                    <td className="px-4 py-4 text-xs text-slate-600 wrap-anywhere">{tx.from} → {tx.to}</td>
                     <td className="px-4 py-4 text-right font-mono font-semibold text-slate-900">{fmt(tx.amount)}</td>
                     <td className="px-4 py-4"><Badge state={tx.status} /></td>
                   </tr>
@@ -1352,15 +1421,15 @@ function TransactionsPage({ transactions, currentAccountId, onViewLedger }: {
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                 <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
                   <h3 className="font-semibold text-slate-900 text-sm">Details</h3>
-                  <button onClick={() => setSelected(null)} className="text-slate-400 hover:text-slate-600"><XIcon size={14} /></button>
+                  <button type="button" aria-label="Close transaction details" onClick={() => setSelectedId(null)} className="text-slate-400 hover:text-slate-600"><XIcon size={14} /></button>
                 </div>
                 <div className="px-5 py-4 space-y-4">
                   <div className="flex justify-between"><Badge state={selected.type} /><Badge state={selected.status} /></div>
                   <div><p className="text-3xl font-bold font-mono text-slate-900">{fmt(selected.amount)}</p><p className="text-xs text-slate-400 mt-1">{selected.timestamp}</p></div>
                   <div className="space-y-3">
-                    {[["Transaction ID", shortId(selected.id)], ["Source", selected.from], ["Destination", selected.to],
-                      ["Escrow", shortId(selected.escrowId)], ["Milestone", shortId(selected.milestoneId)]].map(([k, v]) => (
-                      <div key={k}><span className="text-xs text-slate-400 block">{k}</span><span className="font-mono text-xs text-slate-700 font-medium">{v}</span></div>
+                    {[["Source", selected.from], ["Destination", selected.to],
+                      ["Escrow", selected.escrowId ? selected.escrowTitle : null], ["Milestone", selected.milestoneTitle]].map(([k, v]) => v && (
+                      <div key={k}><span className="block text-xs text-slate-500">{k}</span><span className="text-sm font-medium text-slate-700 wrap-anywhere">{v}</span></div>
                     ))}
                   </div>
                   <Btn variant="outline" size="sm" className="w-full justify-center" onClick={onViewLedger}>View Ledger Entries</Btn>
@@ -1434,10 +1503,14 @@ function LedgerPage({ entries, summary }: {
             </thead>
             <tbody className="divide-y divide-slate-50">
               {entries.length === 0 && <tr><td colSpan={6} className="px-5 py-12 text-center text-slate-400 text-sm">No ledger entries yet.</td></tr>}
-              {entries.map((e, i) => (
-                <tr key={i} className="hover:bg-slate-50 transition-colors">
-                  <td className="px-5 py-4"><Badge state={e.txType} /><p className="font-mono text-xs text-slate-400 mt-1">{shortId(e.txId)}</p></td>
-                  <td className="px-4 py-4 text-xs text-slate-700 font-medium">{e.account}</td>
+              {entries.map(e => (
+                <tr key={e.id} className="hover:bg-slate-50 transition-colors">
+                  <td className="px-5 py-4">
+                    <p className="text-sm font-semibold text-slate-800 wrap-anywhere">{e.transaction?.escrowTitle ?? "Transaction"}</p>
+                    {e.transaction?.milestoneTitle && <p className="mt-0.5 text-xs text-slate-600 wrap-anywhere">{e.transaction.milestoneTitle}</p>}
+                    {e.transaction && <div className="mt-1 flex flex-wrap items-center gap-2"><Badge state={e.transaction.type} /><span className="text-xs text-slate-500">{e.transaction.timestamp}</span></div>}
+                  </td>
+                  <td className="px-4 py-4 text-sm font-medium text-slate-700 wrap-anywhere">{e.account}</td>
                   <td className="px-4 py-4"><Badge state={e.entryType} /></td>
                   <td className="px-4 py-4 text-right font-mono text-sm">{e.entryType === "DEBIT" ? <span className="text-red-600 font-semibold">{fmt(e.amount)}</span> : <span className="text-slate-300">—</span>}</td>
                   <td className="px-4 py-4 text-right font-mono text-sm">{e.entryType === "CREDIT" ? <span className="text-emerald-600 font-semibold">{fmt(e.amount)}</span> : <span className="text-slate-300">—</span>}</td>
@@ -2022,7 +2095,6 @@ export default function App() {
   const [rawEscrows, setRawEscrows] = useState<api.EscrowWithReleaseItems[]>([])
   const [clientAccount, setClientAccount] = useState<BackendAccount | null>(null)
   const [providerAccount, setProviderAccount] = useState<BackendAccount | null>(null)
-  const [escrowAccount, setEscrowAccount] = useState<BackendAccount | null>(null)
   const [rawTransactions, setRawTransactions] = useState<BackendTransaction[]>([])
   const [rawLedgerEntries, setRawLedgerEntries] = useState<BackendLedgerEntry[]>([])
   const [ledgerSummary, setLedgerSummary] = useState<{ totalDebits: number; totalCredits: number; balanced: boolean; transactionsValidated: number } | null>(null)
@@ -2051,17 +2123,10 @@ export default function App() {
   const clientUser = currentRole === "CLIENT" ? authenticatedUser ?? undefined : users.find(u => u.type === "CLIENT")
   const providerUser = currentRole === "PROVIDER" ? authenticatedUser ?? undefined : users.find(u => u.type === "PROVIDER")
   const availableProviders = users.filter(u => (u.role ?? u.type) === "PROVIDER" && u.isActive !== false)
-  const userName = useCallback((id: string) => {
-    const user = users.find(u => u.id === id)
-    return user?.name ?? user?.username ?? user?.email ?? id
-  }, [users])
-  const accountLabel = useCallback((accountId: string) => {
-    if (accountId === clientAccount?.id) return `${clientUser?.name ?? "Client"} Account`
-    if (accountId === providerAccount?.id) return `${providerUser?.name ?? "Provider"} Account`
-    if (accountId === escrowAccount?.id || accountId === api.ESCROW_ACCOUNT_ID) return "Escrow Account"
-    if (accountId === "account-clearing") return "External Clearing (Demo)"
-    return accountId
-  }, [clientAccount, providerAccount, escrowAccount, clientUser, providerUser])
+  const participantName = (id: string, fallback: string) => {
+    const participant = authenticatedUser?.id === id ? authenticatedUser : users.find(user => user.id === id)
+    return participant?.name || participant?.username || fallback
+  }
 
   const addToast = useCallback((t: Omit<Toast, "id">) => {
     const id = genId()
@@ -2116,13 +2181,9 @@ export default function App() {
       const validation = currentRole === "ADMIN" ? await api.validateLedger() : null
       const escrowsWithMilestones = await api.getAllEscrowsWithReleaseItems(currentRole === "ADMIN")
       const ownAccount = currentRole === "ADMIN" ? null : await api.getAccountByUserId(authenticatedUser.id)
-      const escrowAcc = currentRole === "ADMIN" && validation?.escrowHeld === undefined
-        ? await api.getAccountById(api.ESCROW_ACCOUNT_ID)
-        : null
       setRawEscrows(escrowsWithMilestones)
       setClientAccount(currentRole === "CLIENT" ? ownAccount : null)
       setProviderAccount(currentRole === "PROVIDER" ? ownAccount : null)
-      setEscrowAccount(escrowAcc)
       setLedgerSummary(validation ? { totalDebits: validation.results.reduce((s, r) => s + r.totalDebits, 0), totalCredits: validation.results.reduce((s, r) => s + r.totalCredits, 0), balanced: validation.allBalanced, transactionsValidated: validation.totalTransactions } : null)
 
       const [escrowTransactions, accountTransactions] = await Promise.all([
@@ -2153,7 +2214,7 @@ export default function App() {
     const meta = escrowMeta[e.id] ?? { domain: e.agreementType ?? "General", releaseModel: (e.releaseModel === "CONDITION_BASED" ? "Condition Based" : "Milestone Based") as ReleaseModel }
     return {
       id: e.id, title: e.title, description: e.description, domain: meta.domain,
-      providerName: userName(e.freelancerId), providerId: e.freelancerId, clientId: e.clientId,
+      clientName: participantName(e.clientId, "Client"), providerName: participantName(e.freelancerId, "Provider"),
       totalAmount: e.totalAmount, releaseModel: meta.releaseModel,
       state: e.releaseModel === "CONDITION_BASED" || !milestones || ["DISPUTED", "RELEASED", "CANCELLED", "RESOLVED"].includes(e.status) ? e.status as EscrowState : deriveEscrowState(milestones), ...(milestones ? { milestones } : {}), conditions: e.releaseEligibility?.conditions ?? e.conditions ?? [], disputes: e.disputes ?? [],
       releaseEligible: e.releaseEligibility?.eligible ?? false, releaseBlockedReason: e.releaseEligibility?.reason ?? "Escrow is not fully funded", createdAt: fmtTime(e.createdAt),
@@ -2161,20 +2222,38 @@ export default function App() {
     }
   })
 
-  const transactions: Transaction[] = rawTransactions.map(t => ({
-    id: t.id, type: t.type, escrowId: t.escrowId,
-    escrowTitle: rawEscrows.find(e => e.id === t.escrowId)?.title ?? (t.type === "DEPOSIT" ? "Account deposit" : t.type === "WITHDRAWAL" ? "Account withdrawal" : "Escrow transaction"),
-    milestoneId: t.milestoneId ?? "", amount: t.amount,
-    from: accountLabel(t.fromAccountId), to: accountLabel(t.toAccountId),
-    fromAccountId: t.fromAccountId, toAccountId: t.toAccountId,
-    status: t.status, timestamp: fmtTime(t.createdAt),
-  }))
+  const escrowsById = new Map(escrows.map(escrow => [escrow.id, escrow]))
+  const walletLabel = authenticatedUser ? `${authenticatedUser.name} Account` : "Personal Account"
+  const transactions: Transaction[] = rawTransactions.map(t => {
+    const escrow = t.escrowId ? escrowsById.get(t.escrowId) : undefined
+    const clientLabel = `${escrow?.clientName ?? "Client"} Account`
+    const providerLabel = `${escrow?.providerName ?? "Provider"} Account`
+    // The transfer type determines each account's role, including per-escrow holding accounts.
+    const flow: Record<Transaction["type"], { from: string; to: string }> = {
+      FUND: { from: clientLabel, to: "Escrow Account" },
+      RELEASE: { from: "Escrow Account", to: providerLabel },
+      REFUND: { from: "Escrow Account", to: clientLabel },
+      DEPOSIT: { from: "External Clearing", to: walletLabel },
+      WITHDRAWAL: { from: walletLabel, to: "External Clearing" },
+    }
+    return {
+      id: t.id, type: t.type, escrowId: t.escrowId,
+      escrowTitle: escrow?.title ?? (t.type === "DEPOSIT" ? "Account deposit" : t.type === "WITHDRAWAL" ? "Account withdrawal" : "Escrow transaction"),
+      milestoneId: t.milestoneId ?? "", amount: t.amount,
+      milestoneTitle: t.milestoneId ? escrow?.milestones?.find(milestone => milestone.id === t.milestoneId)?.title ?? "Milestone" : undefined,
+      ...flow[t.type],
+      fromAccountId: t.fromAccountId, toAccountId: t.toAccountId,
+      status: t.status, timestamp: fmtTime(t.createdAt),
+    }
+  })
 
-  const ledger: LedgerEntry[] = rawLedgerEntries.map(entry => ({
-    txId: entry.transactionId,
-    txType: rawTransactions.find(t => t.id === entry.transactionId)?.type ?? "FUND",
-    account: accountLabel(entry.accountId), entryType: entry.type, amount: entry.amount, balance: entry.balance,
-  }))
+  const transactionsById = new Map(transactions.map(transaction => [transaction.id, transaction]))
+  const ledger: LedgerEntry[] = rawLedgerEntries.map(entry => {
+    const transaction = transactionsById.get(entry.transactionId)
+    const account = entry.accountId === transaction?.fromAccountId ? transaction.from
+      : entry.accountId === transaction?.toAccountId ? transaction.to : "Account"
+    return { id: entry.id, transaction, account, entryType: entry.type, amount: entry.amount, balance: entry.balance }
+  })
 
   const selectedEscrow = selectedEscrowId
     ? escrows.find(e => e.id === selectedEscrowId)
@@ -2443,7 +2522,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-slate-50">
+    <div className="flex h-screen overflow-clip bg-slate-50">
       <Sidebar page={page} setPage={p => p === "escrow" ? openEscrowList() : setPage(p)} role={currentRole} user={user} onSwitch={handleSwitch} />
 
       {dataLoading && rawEscrows.length === 0 ? (
@@ -2458,7 +2537,6 @@ export default function App() {
           {page === "dashboard" && currentRole !== "ADMIN" && (
             <DashboardPage
               escrows={escrows} transactions={transactions} role={currentRole} user={user}
-              clientName={clientUser?.name ?? "Test Client"}
               clientBalance={clientAccount?.balance ?? 0} providerBalance={providerAccount?.balance ?? 0}
               setPage={p => p === "escrow" ? openEscrowList() : setPage(p)} setSelectedEscrowId={navigateToEscrow}
               onCreateEscrow={() => setShowCreateModal(true)}
@@ -2466,7 +2544,7 @@ export default function App() {
           )}
           {page === "escrow" && selectedEscrow ? (
             <EscrowDetailsPage
-              escrow={selectedEscrow} role={currentRole} clientName={clientUser?.name ?? "Test Client"}
+              escrow={selectedEscrow} role={currentRole}
               currentUserId={user.id} users={users}
               onAction={handleAction} onConditionAction={handleConditionAction}
               onConditionCreate={handleConditionCreate} onConditionUpdate={handleConditionUpdate}
@@ -2476,7 +2554,7 @@ export default function App() {
               onBack={openEscrowList}
             />
           ) : page === "escrow" ? (
-            <EscrowListPage escrows={escrows} role={currentRole} clientName={clientUser?.name ?? "Test Client"} setSelectedEscrowId={navigateToEscrow} onCreateEscrow={() => setShowCreateModal(true)} />
+            <EscrowListPage escrows={escrows} role={currentRole} setSelectedEscrowId={navigateToEscrow} onCreateEscrow={() => setShowCreateModal(true)} />
           ) : null}
           {page === "transactions" && (
             <TransactionsPage
